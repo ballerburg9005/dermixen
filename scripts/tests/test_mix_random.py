@@ -182,12 +182,14 @@ else:
 
     def test_second_handover_can_be_two_bars_earlier(self):
         self.prepare()
-        reference = self.invoke('--seed', '42', '--master', 'none')
+        reference = self.invoke('--seed', '42', '--master', 'none',
+                                '--advance-bars', '0')
         self.assertEqual(reference.returncode, 0, reference.stderr)
         baseline = json.loads(self.out.with_suffix('.tracklist.json').read_text())
         comparison = self.out.with_name('advanced.mp3')
         changed = self.invoke('--seed', '42', '--master', 'none',
-                              '--advance-transition', '2:2', output=comparison)
+                              '--advance-bars', '0', '--advance-transition', '2:2',
+                              output=comparison)
         self.assertEqual(changed.returncode, 0, changed.stderr)
         adjusted = json.loads(comparison.with_suffix('.tracklist.json').read_text())
         self.assertEqual(baseline['tracks'][0]['outro_beat'],
@@ -197,6 +199,20 @@ else:
         self.assertGreater(
             baseline['transitions'][1]['incoming_start_seconds'],
             adjusted['transitions'][1]['incoming_start_seconds'])
+
+    def test_default_handover_advances_four_bars(self):
+        self.prepare()
+        default = self.invoke('--seed', '42', '--master', 'none')
+        self.assertEqual(default.returncode, 0, default.stderr)
+        default_manifest = json.loads(self.out.with_suffix('.tracklist.json').read_text())
+        baseline_output = self.out.with_name('no-advance.mp3')
+        neutral = self.invoke('--seed', '42', '--master', 'none',
+                              '--advance-bars', '0', output=baseline_output)
+        self.assertEqual(neutral.returncode, 0, neutral.stderr)
+        neutral_manifest = json.loads(baseline_output.with_suffix('.tracklist.json').read_text())
+        for current, original in zip(default_manifest['tracks'][:-1],
+                                     neutral_manifest['tracks'][:-1]):
+            self.assertEqual(current['outro_beat'] + 16, original['outro_beat'])
 
     def test_uniform_track_gain_override(self):
         self.prepare()
