@@ -73,7 +73,7 @@ def transcode(source: Path, cache: Path) -> Path:
     try:
         run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
              '-i', str(source), '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '44100',
-             '-c:a', 'pcm_s16le', str(tmp)])
+             '-c:a', 'pcm_f32le', str(tmp)])
         tmp.replace(dest)
     finally:
         tmp.unlink(missing_ok=True)
