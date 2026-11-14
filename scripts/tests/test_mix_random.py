@@ -85,7 +85,12 @@ else:
         for entry in playlist['tracks']:
             self.assertEqual(entry['intro_beat'], 0)
             self.assertGreater(entry['outro_beat'], entry['intro_beat'])
-        self.assertIn('cut', [e['outgoing_preset'] for e in playlist['tracks']])
+        # No tempo difference may force an abrupt jump between two songs.
+        self.assertTrue(all(e['outgoing_preset'] == 'beatmix'
+                            for e in playlist['tracks'][:-1]))
+        self.assertEqual(playlist['tracks'][-1]['outgoing_preset'], 'cut')
+        # Anchor moves back by the full transition span, not to the last note.
+        self.assertLess(short['outro_beat'], 280)
         self.assertTrue(self.out.with_suffix('.dmx').exists())
         self.assertEqual(self.out.read_bytes(), b'MOCK-MP3')
 
@@ -94,7 +99,7 @@ else:
         for command in commands:
             args = json.loads(command)
             self.assertIn('--gain', args)
-            self.assertEqual(args[args.index('--gain') + 1], '-3.0')
+            self.assertEqual(args[args.index('--gain') + 1], '-7.0')
             self.assertEqual(args[args.index('--intro') + 1], '0')
 
         refused = self.invoke('--seed', '42', '--master', 'none')
