@@ -41,35 +41,53 @@ On macOS, `scripts/bundle-macos.sh` makes `target/Dermixen.app`, and you can dra
 
 ## Randomized folder mix (Dancecore.party test)
 
-From the repository root, build only the command-line engine and then mix every
-supported audio file under a folder in a shuffled order:
+Build the **existing Dermixen audio engine**, then test eight random tracks from a folder:
 
 ```sh
 cargo build --release --locked -p dermixen-cli
-python3 scripts/mix-random.py ~/Music/my-tracks -o ~/random-mix.mp3
+python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-mix.mp3 --limit 8 --seed 42
 ```
 
-This uses Dermixen's existing analyzers, beatmatching, transition presets, and MP3 renderer;
-the Python script only selects and prepares inputs and invokes the CLI. The default is an
-8-bar `beatmix` between neighboring songs, with **no track-count limit**. To audition a
-shorter reproducible set:
+Unlike the first version, this helper **protects short songs**. The engine's
+anchor detector can assign an outro near the beginning of a two-minute
+track and make the next song enter a minute too soon. The script asks
+Dermixen for each file's length, BPM, and extent, overrides implausibly
+early anchors, and places transitions within the last seconds of the song.
+It requires the detected sound ending to be at least 93% of file duration.
+
+Default transitions are **2 bars**: bass swaps for similar tempos, intentional
+on-beat cuts when tempos differ by at least 12%. The next song's intro anchor
+is beat zero so the entire beginning is represented. This is a conservative
+test safeguard, not sophisticated phrase or drop detection.
+
+The original -14 LUFS track leveling is bypassed **only for this helper**:
+each track gets -3 dB headroom, Dermixen renders to an intermediate WAV,
+and FFmpeg peak-normalizes the complete mix to -1 dBFS before encoding the
+MP3 once. It does not do full loudness or true-peak mastering.
+
+Compare fixed transition styles with the same seed:
 
 ```sh
-python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-set.mp3 --limit 8 --seed 42 --bars 4
+python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-bassswap.mp3 --limit 8 --seed 42 --preset bass-swap --bars 2
+python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-hardcuts.mp3 --limit 8 --seed 42 --preset cut
 ```
 
-The input directory is scanned recursively. Native formats are MP3, WAV, FLAC, M4A and MP4.
-OGG, OGA, Opus, WebM, AAC, WMA and AIFF use **FFmpeg** to prepare WAV input. Converted audio
-is retained beside the output in `test-set.sources/`, so the editable `test-set.dmx`
-continues to work. The ordered original sources are recorded in
-`test-set.tracklist.json`. Do not delete the converted-source directory while using the
-DMX project. If an output already exists, pass `--force` to replace it. A failed input
-stops the run with its error instead of silently leaving it out.
+Options: `--bars 4` for longer transitions; `--master none` to skip
+master peak normalization; `--track-gain-db 0` to disable track headroom;
+`--peak-db -1.5` to lower the final peak; `--force` to overwrite the
+previous mix. The original filenames, ordered transitions, BPMs, and
+old/new anchors appear in `test-mix.tracklist.json`. The editable
+`test-mix.dmx` file is preserved.
 
-Install FFmpeg and Python 3 on the host; neither is an extra Python package dependency.
-This is **random ordering for engine validation**, not intelligent harmonic playlist
-selection. The script does not fetch remote music or use WordPress. Only mix audio for
-which you have the necessary rights.
+WAV, MP3, FLAC, M4A and MP4 are native inputs. OGG, Opus, WebM, AAC, WMA and
+AIFF are converted with FFmpeg and kept in the adjacent `test-mix.sources/`
+directory; keep that directory while editing the DMX. Folders are scanned
+recursively, without fetching off-site tracks.
+
+Test the orchestration without a Rust engine build with:
+`python3 -m unittest discover -s scripts/tests -p 'test_mix_random.py' -v`.
+These tests use a mock Dermixen CLI. Listening tests with the actual engine
+remain necessary.
 
 ## Make a mix
 
