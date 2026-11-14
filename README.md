@@ -41,61 +41,62 @@ On macOS, `scripts/bundle-macos.sh` makes `target/Dermixen.app`, and you can dra
 
 ## Randomized folder mix (Dancecore.party test)
 
-This fork changes the Rust beat analyzer's tempo search from 60–200 BPM
-to **60–360 BPM**, with a prior centered on 215 BPM. It is intended to
-recognize 200–300 BPM dancecore rather than systematically locking to
-half-time estimates near 100–150 BPM. The kick onset evidence still decides
-between plausible tempos, so exact half/double values cannot be guaranteed.
+This fork extends the beat analyzer to 60-360 BPM and centers its prior at
+215 BPM, so it can detect typical 180-300 BPM dancecore instead of limiting
+all detections to 200 BPM. The analyzer still can make half-time or
+double-time errors, so listen to any suspicious beat grids.
 
-**Rebuild the Rust CLI** after pulling analyzer changes:
+Build the CLI after pulling the fork, then render three songs:
 
 ```sh
 cargo build --release --locked -p dermixen-cli
-python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-mix-v3.mp3 --limit 8 --seed 42
+python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-mix.mp3 --limit 3 --seed 42
 ```
 
-The helper passes the fresh analyzed BPM and beat phase directly to every
-`mix add` command. Dermixen's persistent library may still contain old 100-125
-BPM records from the former 60-200 BPM analyzer. Before rendering, the helper
-uses `mix show --json` to verify the timeline's BPMs, first beats, source
-lengths, and overlaps. It refuses an unexpected gap instead of rendering
-minutes of silence. This protects users who upgrade their existing library.
+The script randomly selects tracks from the folder, scans MP3/WAV/FLAC/M4A/MP4
+natively, and converts OGG/Opus/WebM/AAC/WMA/AIFF with FFmpeg. The fresh
+analyzed BPM and beat phase are passed into the `mix add` command, bypassing
+stale half-time beat grids stored in Dermixen's persistent library. Before
+rendering, the script verifies that the actual mix uses those BPMs and has
+no unintended timeline gaps.
 
-The helper uses the real Dermixen analyzer and rendering engine. It scans
-MP3/WAV/FLAC/M4A/MP4 files recursively, and transcodes OGG/Opus/WebM/AAC/WMA/
-AIFF with FFmpeg. Track order is shuffled; `--seed 42` keeps it reproducible.
-The editable `test-mix-v3.dmx` and analyzed source tracklist are preserved.
-
-**Default handovers are now 8-bar beatmatched fades**, roughly 6–11 seconds
-at 180–300 BPM. There are **no automatic hard cuts based on tempo jumps**.
-Every track's outro anchor is placed roughly one transition length before
-the end of detected sound. Only a verified trailing *continuous silence* is
-skipped; a melody or ringing note must fade naturally rather than being
-truncated by the outgoing cut. The next track starts from its beginning.
-
-The helper uses fixed -7 dB per-track headroom, renders a temporary WAV,
-then peak-normalizes the final mix to -1 dBFS through FFmpeg before encoding
-a 320 kbps MP3 once. This is peak-level mastering rather than compression
-or loudness matching.
-
-To compare shorter or longer blends:
+**Transitions** use eight-bar beatmatched fades by default. The outgoing
+fades finish near the file's end, unless FFmpeg verifies continuous trailing
+silence. Automatic hard cuts are disabled. To move only the second outgoing
+handover (track 2 to track 3) two bars earlier:
 
 ```sh
-python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-4bar.mp3 --limit 8 --seed 42 --bars 4
-python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-12bar.mp3 --limit 8 --seed 42 --bars 12
+python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-earlier.mp3 --limit 3 --seed 42 --advance-transition 2:2
 ```
 
-`--preset bass-swap` hands off bass halfway across the fade;
-`--preset beatmix` selects a simple fade. `--preset cut` is available
-for deliberate hard cuts only; auto no longer chooses it.
-`--force` replaces an existing mix and render.
-`--master none` skips mastering. The JSON tracklist records recognized BPM,
-original analyzed anchors, protected anchors, and the chosen handover style.
+`--advance-bars 1` moves every handover earlier by one bar, and repeating
+`--advance-transition N:BARS` overrides any individual handover. The option
+never moves the last track's end, because that track has no successor.
 
-This remains a test harness, **not yet a creative Auto-DJ**: musical phrase
-recognition, avoiding clashes between vocals and melodies, better drop
-alignment, and harmonic pairing still need development. The CLI is separate
-from the WordPress container.
+After rendering, the program prints exact timeline seek cues, including
+when the incoming track starts and the outgoing source finishes. It writes
+`test-earlier.transitions.txt` and embeds the cues inside
+`test-earlier.tracklist.json`. The editable `.dmx` file is retained.
+
+**Levels and headroom:** In the default `--level-mode peak`, each source gets
+an individual gain matching its measured true peak to `--peak-db -1`.
+This brings source waveform peaks to similar levels without compressing
+each recording. `--level-mode loudness --target-lufs -9` instead matches
+integrated loudness, which is useful when songs have different crest factors.
+`--level-mode fixed --track-gain-db -7` keeps the earlier constant-gain
+behavior for comparison.
+
+Dermixen renders a 32-bit floating-point `*.f32.wav` intermediate so audio
+above the PCM full-scale range is not irreversibly clamped at 16 bits.
+FFmpeg then limits summing peaks caused by overlapping tracks and writes
+a final 320 kbps MP3. The limiter changes peaks that exceed the ceiling,
+but does not lower every song to accommodate the loudest overlap.
+An MP3 may decode to peaks above 0 dBFS even when its encoded input was
+limited below 0 dBFS. That is a codec property, not a mastering target.
+
+Use `--bars 4` or `--bars 12` to compare fade lengths. The current script
+is not a creative Auto-DJ: phrase-aware planning, vocal separation,
+and drop selection still require work. It runs separately from WordPress.
 
 ## Make a mix
 
