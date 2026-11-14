@@ -234,6 +234,11 @@ impl ThreeBandEq {
 
     /// Filters `frames` in place.
     pub fn process(&mut self, frames: &mut [Frame]) {
+        // A flat DJ EQ must not subtly change an already-mastered track's
+        // transient shape or overdriven distortion through crossover phase.
+        // Still run the filters below to keep their state warm in case a
+        // transition or user automation subsequently changes an EQ band.
+        let flat = self.gains == [Decibels::UNITY; 3];
         let [gain_low, gain_mid, gain_high] = self.gains.map(Decibels::to_linear);
         for frame in frames {
             for (channel, sample) in frame.iter_mut().enumerate() {
@@ -245,7 +250,9 @@ impl ThreeBandEq {
                 let low_matched = self.low_phase_match_lp.process(low, channel)
                     + self.low_phase_match_hp.process(low, channel);
                 let output = low_matched * gain_low + mid * gain_mid + high * gain_high;
-                *sample = output as f32;
+                if !flat {
+                    *sample = output as f32;
+                }
             }
         }
     }
@@ -258,5 +265,48 @@ impl ThreeBandEq {
         self.high.reset();
         self.low_phase_match_lp.reset();
         self.low_phase_match_hp.reset();
+    }
+}
+
+#[cfg(test)]
+mod transparency_tests {
+    use super::*;
+
+    #[test]
+    fn unity_eq_passes_original_overdriven_samples_bit_exact() {
+        let mut eq = ThreeBandEq::new();
+        let original: Vec<Frame> = (0..8192)
+            .map(|i| {
+                let tone = ((i as f64 * 2.0 * std::f64::consts::PI * 440.0
+                    / f64::from(SAMPLE_RATE)).sin() * 1.35) as f32;
+                [tone, tone * -0.83]
+            })
+            .collect();
+        let mut result = original.clone();
+        for block in result.chunks_mut(513) {
+            eq.process(block);
+        }
+        assert_eq!(result, original, "flat EQ must not alter the original source");
+        assert!(result.iter().any(|sample| sample[0].abs() > 1.0));
+    }
+
+    #[test]
+    fn nonzero_eq_gains_still_change_samples_and_filters_stay_warm() {
+        let mut warm = ThreeBandEq::new();
+        let mut cold = ThreeBandEq::new();
+        let mut front = vec![[0.8f32, -0.8f32]; 4410];
+        warm.process(&mut front);
+        assert!(front.iter().all(|sample| *sample == [0.8, -0.8]));
+        warm.set_gains(Decibels(-6.0), Decibels::UNITY, Decibels::UNITY);
+        cold.set_gains(Decibels(-6.0), Decibels::UNITY, Decibels::UNITY);
+        let mut next_warm = vec![[0.8f32, -0.8f32]; 512];
+        let mut next_cold = next_warm.clone();
+        warm.process(&mut next_warm);
+        cold.process(&mut next_cold);
+        assert!(next_warm.iter().any(|sample| sample[0] < 0.79));
+        let jump_warm = (next_warm[0][0] - next_warm[1][0]).abs();
+        let jump_cold = (next_cold[0][0] - next_cold[1][0]).abs();
+        assert!(jump_warm < jump_cold,
+            "flat processing must prime the EQ filters before automation");
     }
 }
