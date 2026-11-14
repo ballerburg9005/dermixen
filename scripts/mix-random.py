@@ -268,50 +268,43 @@ def join_preset(requested: str, previous: dict, following: dict) -> str:
     return 'beatmix'
 
 
-def individual_gain(record: dict, mode: str, target_peak_db: float,
-                    fixed_db: float, target_lufs: float) -> float:
-    """Normalize each source independently without changing its dynamics.
+def master_uniform(source: Path, output: Path, ceiling_db: float) -> None:
+    """Apply only a shared attenuation when the complete mix exceeds a ceiling.
 
-    Peak leveling matches measured true peaks, so songs with quieter waveforms
-    no longer remain at 60% of the preceding song. Loudness leveling matches
-    integrated loudness instead. Neither applies compression to the track.
-    """
-    if mode == 'fixed':
-        return fixed_db
-    loudness = record.get('loudness') or {}
-    field = 'true_peak_db' if mode == 'peak' else 'integrated_lufs'
-    value = loudness.get(field)
-    if value is None or not math.isfinite(float(value)):
-        raise RuntimeError(
-            f'Dermixen did not measure {field}; use --level-mode fixed '
-            'if this audio cannot be measured.')
-    target = target_peak_db if mode == 'peak' else target_lufs
-    gain = float(target) - float(value)
-    # Limit extreme corrections to avoid magnifying noise in silent sources.
-    return round(max(-15.0, min(9.0, gain)), 4)
-
-
-def master_limit(source: Path, output: Path, target_db: float) -> None:
-    """Limit only peaks above the target while preserving the float mix.
-
-    Dermixen's 16-bit WAV and MP3 outputs clamp before mastering. Rendering
-    to *.f32.wav keeps the original floating-point samples intact. FFmpeg's
-    lookahead limiter then prevents overlaps from hard-clipping, without
-    reducing the level of every song to accommodate the loudest transition.
+    No track is individually normalized and there is no limiter/compressor.
+    The floating-point intermediate retains over-range decoded MP3 samples.
+    FFmpeg astats reads those samples without first clipping them to int16.
     """
     if not shutil.which('ffmpeg'):
-        raise RuntimeError('ffmpeg is required for the float master limiter')
-    threshold = 10 ** (target_db / 20.0)
-    filterchain = f'alimiter=limit={threshold:.8f}:attack=5:release=100:level=0'
+        raise RuntimeError('ffmpeg is required for the unclipped float master')
+    result = subprocess.run(
+        ['ffmpeg', '-nostdin', '-hide_banner', '-i', str(source),
+         '-af', 'astats=metadata=0:reset=0', '-f', 'null', '-'],
+        check=True, capture_output=True, text=True)
+    overall = result.stderr.rfind('] Overall')
+    if overall < 0:
+        raise RuntimeError('FFmpeg did not report overall floating-point peak statistics')
+    matches = re.findall(r'Peak level dB:\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)|-inf)',
+                         result.stderr[overall:])
+    if not matches:
+        raise RuntimeError('FFmpeg did not report a floating-point peak level')
+    peak_text = matches[0]
+    measured_db = float(peak_text)
+    if not math.isfinite(measured_db) and measured_db != -math.inf:
+        raise RuntimeError(f'invalid floating-point master peak: {peak_text}')
+    # Never raise the overall level. A single common attenuation protects
+    # the export while preserving the recorded differences between songs.
+    attenuation_db = min(0.0, ceiling_db - measured_db)
+    print(f'Master: input peak {measured_db:+.2f} dBFS, '
+          f'global attenuation {attenuation_db:+.2f} dB. '
+          'Every track keeps its original relative level.',
+          flush=True)
     command = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-               '-i', str(source), '-af', filterchain]
+               '-i', str(source), '-af', f'volume={attenuation_db:.6f}dB']
     if output.suffix.lower() == '.mp3':
         command += ['-c:a', 'libmp3lame', '-b:a', '320k', str(output)]
     else:
         command += ['-c:a', 'pcm_s16le', str(output)]
-    print(f'Mastering: limiting overlapping peaks to {target_db:.1f} dBFS '
-          'from the floating-point mix, preserving individual song levels.',
-          flush=True)
     run(command)
 
 
@@ -330,16 +323,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--advance-transition', action='append', default=[],
                         metavar='N:BARS',
                         help='Move only transition N by BARS, e.g. 2:2 for track 2 -> 3')
-    parser.add_argument('--level-mode', choices=('peak', 'loudness', 'fixed'), default='peak',
-                        help='Match individual decoded peaks (default), loudness or fixed gain')
-    parser.add_argument('--track-gain-db', type=float, default=-7.0,
-                        help='Gain in fixed mode only (default -7 dB)')
-    parser.add_argument('--target-lufs', type=float, default=-9.0,
-                        help='Target integrated LUFS in loudness mode (default -9)')
-    parser.add_argument('--master', choices=('peak', 'none'), default='peak',
-                        help='Float WAV and lookahead peak limiter (default) or raw render')
+    parser.add_argument('--track-gain-db', type=float, default=0.0,
+                        help='Same gain for all tracks, default 0 dB (original levels)')
+    parser.add_argument('--master', choices=('safe', 'peak', 'none'), default='safe',
+                        help='Safe: shared attenuation only, no compressor or boosts (default)')
     parser.add_argument('--peak-db', type=float, default=-1.0,
-                        help='Peak target/limiter ceiling in dBFS (default -1)')
+                        help='Export peak ceiling in dBFS (default -1)')
     parser.add_argument('--force', action='store_true', help='Replace existing mix/output')
     parser.add_argument('--dermixen', help='Existing Dermixen executable')
     args = parser.parse_args(argv)
@@ -359,8 +348,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error('--track-gain-db must be between -18 and 0')
     if not math.isfinite(args.peak_db) or not -12 <= args.peak_db <= -0.5:
         parser.error('--peak-db must be between -12 and -0.5')
-    if not math.isfinite(args.target_lufs) or not -30 <= args.target_lufs <= -5:
-        parser.error('--target-lufs must be between -30 and -5')
     document = output.with_suffix('.dmx')
     manifest = output.with_suffix('.tracklist.json')
     cache = output.with_suffix('.sources')
@@ -403,9 +390,7 @@ def main(argv: list[str] | None = None) -> int:
                           if next_entry is not None else None)
             entry['timing'] = track_timing(entry['record'], args.bars,
                                            outgoing_preset, silence_at, advance)
-            entry['track_gain_db'] = individual_gain(
-                entry['record'], args.level_mode, args.peak_db,
-                args.track_gain_db, args.target_lufs)
+            entry['track_gain_db'] = args.track_gain_db
 
         if document.exists():
             document.unlink()
@@ -448,14 +433,12 @@ def main(argv: list[str] | None = None) -> int:
             with tempfile.TemporaryDirectory(prefix='.dermixen-master-', dir=output.parent) as temp:
                 wav = Path(temp) / 'premaster.f32.wav'
                 run([dermixen, 'render', str(document), str(wav)])
-                master_limit(wav, output, args.peak_db)
+                master_uniform(wav, output, args.peak_db)
 
         cues = transition_cues(layout, entries, output)
         manifest.write_text(json.dumps({'preset': args.preset, 'bars': args.bars,
                                         'seed': args.seed, 'master': args.master,
                                         'track_gain_db': args.track_gain_db,
-                                        'level_mode': args.level_mode,
-                                        'target_lufs': args.target_lufs,
                                         'tracks': playlist, 'transitions': cues}, indent=2) + '\n',
                             encoding='utf-8')
         print(f'Finished: {output}\nEditable mix: {document}\nTracklist: {manifest}', flush=True)
