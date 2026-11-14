@@ -185,7 +185,8 @@ fn wants_mp3(path: &Path) -> bool {
 /// Use floating point only for files explicitly named *.f32.wav.
 /// Such files preserve peaks above 0 dBFS for later lossless mastering.
 fn wav_depth(path: &Path) -> WavDepth {
-    if path.file_name()
+    if path
+        .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.to_ascii_lowercase().ends_with(".f32.wav"))
     {
