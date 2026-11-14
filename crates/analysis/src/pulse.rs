@@ -27,7 +27,8 @@ pub const HOP: usize = 256;
 const MIN_BPM: f64 = 60.0;
 
 /// The fastest tempo considered, in beats per minute.
-const MAX_BPM: f64 = 200.0;
+/// Dancecore, mashcore, and speedcore routinely exceed 200 BPM.
+const MAX_BPM: f64 = 360.0;
 
 /// How far either side of the expected lag each refinement stage looks, in
 /// beats: less than half a beat, so the peak one beat over is never taken.
@@ -39,7 +40,9 @@ const REFINE_WINDOW_BEATS: f64 = 0.4;
 const KICK_LAG_SHARE: f64 = 0.75;
 
 /// The tempo the prior is centered on, in beats per minute.
-const PRIOR_BPM: f64 = 130.0;
+/// This fork targets fast dancecore; the prior only disambiguates octave
+/// aliases when the kick's onset evidence does not settle the tempo.
+const PRIOR_BPM: f64 = 215.0;
 
 /// The width of the prior, in octaves at one standard deviation.
 const PRIOR_WIDTH_OCTAVES: f64 = 1.0;
@@ -508,7 +511,7 @@ mod tests {
 
     #[test]
     fn a_kick_track_gets_its_tempo_to_a_hundredth_of_a_percent() {
-        for bpm in [118.0f64, 132.5, 145.0] {
+        for bpm in [118.0f64, 132.5, 145.0, 200.0, 220.0, 250.0, 300.0] {
             let audio = dermixen_testkit::synth::kicks(Bpm(bpm), Seconds(0.1), Seconds(60.0));
             let found = PulseGrid.analyze(&audio).unwrap();
             assert!(
