@@ -88,36 +88,66 @@ def analyze(dermixen: str, path: Path) -> dict:
     return record
 
 
-def track_timing(record: dict, bars: int, outgoing_preset: str) -> dict:
+def trailing_silence_start(source: Path, duration: float) -> float | None:
+    """Locate a genuinely silent *ending*, not a musical break in the middle.
+
+    Unlike Dermixen's full-song extent/anchor guess, this only skips a tail
+    that FFmpeg confirms stays silent right up to the recording's end.
+    """
+    if not shutil.which('ffmpeg'):
+        return None
+    try:
+        completed = subprocess.run(
+            ['ffmpeg', '-nostdin', '-hide_banner', '-i', str(source),
+             '-af', 'silencedetect=noise=-48dB:d=0.6', '-f', 'null', '-'],
+            text=True, capture_output=True, timeout=180, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    # FFmpeg may report a silence_end at EOF or leave the end open.
+    starts = re.findall(r'silence_start:\s*([\d.]+)', completed.stderr)
+    ends = re.findall(r'silence_end:\s*([\d.]+)', completed.stderr)
+    if not starts:
+        return None
+    candidate = float(starts[-1])
+    final_end = float(ends[-1]) if len(ends) >= len(starts) else duration
+    if final_end < duration - 0.5 or duration - candidate < 1.5:
+        return None
+    # Never treat a long, nearly quiet composition as disposable.
+    return max(duration * 0.70, min(duration, candidate))
+
+
+def track_timing(record: dict, bars: int, outgoing_preset: str,
+                 detected_silence_at: float | None = None) -> dict:
     """Conservative anchors: most music plays fully, even if kick anchors misfire.
 
-    The source endpoint is trusted only if it is in the final ~7% / 12 seconds
-    of the recording. No detected 'outro' near the beginning can truncate a
-    2-minute track. Each outgoing fade finishes near the real audio end.
+    An analyzer's arbitrary early outro is ignored. A fade starts near the
+    real file ending (or a verified trailing-silence boundary) and lasts
+    exactly the preset's duration. The last notes fade rather than being cut.
     """
     length = int(record['length_samples'])
     grid = record['grid']
     bpm = float(grid['bpm'])
     first_beat = int(grid['first_beat_sample'])
-    extent = record.get('extent') or {}
     if length <= 0 or not math.isfinite(bpm) or not (20 <= bpm <= 999):
         raise RuntimeError('invalid decoded length or BPM from Dermixen')
     duration = length / SAMPLE_RATE
-    estimated_end = min(duration, max(0.0, int(extent.get('ends_sample', length)) / SAMPLE_RATE))
-    # A mistaken sound-extent/anchor early in the track cannot discard music.
-    max_discard = min(12.0, duration * 0.07)
-    sound_end = max(duration - max_discard, estimated_end)
-    # Allow a 2-beat safety margin after the fade in case of beat-grid errors.
+    sound_end = (duration if detected_silence_at is None else
+                 max(duration * 0.70, min(duration, detected_silence_at)))
+    # Crossfade reaches zero at the end of actual audio, not 7% before it.
     fade_beats = 0 if outgoing_preset == 'cut' else 4 * bars
     desired_fade_start = sound_end - 60.0 * fade_beats / bpm
     first_seconds = first_beat / SAMPLE_RATE
-    outro_beat = math.floor((desired_fade_start - first_seconds) * bpm / 60.0)
+    outgoing_beat = (math.ceil if outgoing_preset == 'cut' else math.floor)
+    outro_beat = outgoing_beat((desired_fade_start - first_seconds) * bpm / 60.0)
     last_beat = math.floor((duration - first_seconds) * bpm / 60.0)
     outro_beat = min(last_beat, max(1, outro_beat))
     if outro_beat <= fade_beats + 1:
         raise RuntimeError('track too short for requested transition bars; use --bars 1')
     return {
         'bpm': bpm, 'duration_seconds': duration, 'sound_end_seconds': sound_end,
+        'trailing_silence_seconds': duration - sound_end,
         'analyzed_intro_beat': (record.get('anchors') or {}).get('intro_beat'),
         'analyzed_outro_beat': (record.get('anchors') or {}).get('outro_beat'),
         'intro_beat': 0, 'outro_beat': outro_beat,
@@ -127,12 +157,11 @@ def track_timing(record: dict, bars: int, outgoing_preset: str) -> dict:
 def join_preset(requested: str, previous: dict, following: dict) -> str:
     if requested != 'auto':
         return requested
-    # Large jumps are better with an intentional on-beat cut than with a
-    # stretched, clashing drum-heavy blend. Nearby BPMs use a low-end handoff.
-    outgoing = previous['bpm']
-    incoming = following['bpm']
-    ratio = abs(incoming - outgoing) / min(incoming, outgoing)
-    return 'cut' if ratio >= 0.12 else 'bass-swap'
+    # A short melodic or hard-ending dancecore track must never be cut off
+    # simply because its neighbor has a different detected tempo. Use
+    # Dermixen's real smooth beatmatched crossfade. Large mismatches still
+    # require better phrase/tempo planning in a future engine iteration.
+    return 'beatmix'
 
 
 def master_peak(source: Path, output: Path, target_db: float) -> None:
@@ -169,11 +198,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--seed', type=int, help='Random seed to reproduce order')
     parser.add_argument('--limit', type=int, help='Maximum tracks; default all')
     parser.add_argument('--preset', choices=('auto', 'beatmix', 'bass-swap', 'blend', 'cut'),
-                        default='auto', help='Auto: bass-swap nearby BPMs, cut large jumps')
-    parser.add_argument('--bars', type=int, default=2,
-                        help='Transition bars (default 2, not 8; for beatmix/bass-swap)')
-    parser.add_argument('--track-gain-db', type=float, default=-3.0,
-                        help='Fixed track headroom before final mastering (default -3 dB)')
+                        default='auto', help='Auto uses smooth beatmatched fades, never hard cuts')
+    parser.add_argument('--bars', type=int, default=4,
+                        help='Transition bars (default 4; for beatmix/bass-swap)')
+    parser.add_argument('--track-gain-db', type=float, default=-7.0,
+                        help='Fixed per-track headroom; final mix is peak-mastered (default -7 dB)')
     parser.add_argument('--master', choices=('peak', 'none'), default='peak',
                         help='Mastering mode (peak default, none for direct Dermixen render)')
     parser.add_argument('--peak-db', type=float, default=-1.0,
@@ -209,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         rng.shuffle(tracks)
         if args.limit is not None:
             tracks = tracks[:args.limit]
-        print(f'Mixing {len(tracks)} shuffled tracks; protecting short songs and their endings.', flush=True)
+        print(f'Mixing {len(tracks)} shuffled tracks with smooth fades, preserving track endings.', flush=True)
         output.parent.mkdir(parents=True, exist_ok=True)
 
         # Analyze the complete playlist before changing any files so every
@@ -230,7 +259,11 @@ def main(argv: list[str] | None = None) -> int:
                 b = {'bpm': float(next_entry['record']['grid']['bpm'])}
                 outgoing_preset = join_preset(args.preset, a, b)
             entry['outgoing_preset'] = outgoing_preset
-            entry['timing'] = track_timing(entry['record'], args.bars, outgoing_preset)
+            silence_at = (trailing_silence_start(entry['prepared'],
+                                                  entry['record']['length_samples'] / SAMPLE_RATE)
+                          if next_entry is not None else None)
+            entry['timing'] = track_timing(entry['record'], args.bars,
+                                           outgoing_preset, silence_at)
 
         if document.exists():
             document.unlink()
@@ -242,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
             source = entry['source']
             print(f'[{index+1}/{len(entries)}] {source.name} | {timing["bpm"]:.1f} BPM | '
                   f'{incoming_preset} in | outro at beat {timing["outro_beat"]} '
-                  f'(analyzer suggested {timing["analyzed_outro_beat"]})', flush=True)
+                  f'(analyzer suggested {timing["analyzed_outro_beat"]}; '
+                  f'fade target {timing["sound_end_seconds"]:.1f}s)', flush=True)
             run([dermixen, 'mix', 'add', str(document), str(entry['prepared']),
                  '--preset', incoming_preset, '--bars', str(args.bars),
                  '--intro', '0', '--outro', str(timing['outro_beat']),
