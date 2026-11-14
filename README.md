@@ -60,16 +60,20 @@ stale half-time beat grids stored in Dermixen's persistent library. Before
 rendering, the script verifies that the actual mix uses those BPMs and has
 no unintended timeline gaps.
 
-**Transitions** use eight-bar beatmatched fades by default. The outgoing
-fades finish near the file's end, unless FFmpeg verifies continuous trailing
-silence. Automatic hard cuts are disabled. To move only the second outgoing
-handover (track 2 to track 3) two bars earlier:
+**Transitions** use eight-bar beatmatched fades by default, with
+their start and completion shifted **four bars earlier** than the old end-of-song
+placement. At 250 BPM, four bars are about 3.84 seconds. This fades the
+outgoing song sooner; use `--advance-bars 0` if its last notes should remain
+audible until the end. Trailing silence is still detected, and automatic
+hard cuts are disabled. To move only the second handover two bars earlier
+than the original timing, while keeping the first handover unadvanced:
 
 ```sh
-python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-earlier.mp3 --limit 3 --seed 42 --advance-transition 2:2
+python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-earlier.mp3 --limit 3 --seed 42 --advance-bars 0 --advance-transition 2:2
 ```
 
-`--advance-bars 1` moves every handover earlier by one bar, and repeating
+`--advance-bars 4` is now the default; `--advance-bars 1` moves each
+handover only one bar earlier. Repeating
 `--advance-transition N:BARS` overrides any individual handover. The option
 never moves the last track's end, because that track has no successor.
 
@@ -102,7 +106,10 @@ samples and should **not** be used when preserving the originals matters.
 
 A quieter master remains quieter than a louder master. Making all songs
 equally loud while keeping their exact original loudness is impossible.
-The default prioritizes preserving the recordings' mastering.
+The default prioritizes preserving the recordings' mastering. Dermixen's flat three-band EQ now
+passes samples through exactly when no EQ is requested; this avoids subtle
+transient changes to already heavily distorted masters. Tempo changes and
+MP3 transcoding may still alter audio, especially during handovers.
 
 Use `--bars 4` or `--bars 12` to compare fade lengths. The current script
 is not a creative Auto-DJ: phrase-aware planning, vocal separation,
