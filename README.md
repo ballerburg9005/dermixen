@@ -54,6 +54,13 @@ cargo build --release --locked -p dermixen-cli
 python3 scripts/mix-random.py ~/Music/my-tracks -o ~/test-mix-v3.mp3 --limit 8 --seed 42
 ```
 
+The helper passes the fresh analyzed BPM and beat phase directly to every
+`mix add` command. Dermixen's persistent library may still contain old 100-125
+BPM records from the former 60-200 BPM analyzer. Before rendering, the helper
+uses `mix show --json` to verify the timeline's BPMs, first beats, source
+lengths, and overlaps. It refuses an unexpected gap instead of rendering
+minutes of silence. This protects users who upgrade their existing library.
+
 The helper uses the real Dermixen analyzer and rendering engine. It scans
 MP3/WAV/FLAC/M4A/MP4 files recursively, and transcodes OGG/Opus/WebM/AAC/WMA/
 AIFF with FFmpeg. Track order is shuffled; `--seed 42` keeps it reproducible.
