@@ -73,7 +73,13 @@ elif args[:2] == ['mix', 'show']:
     print(json.dumps({'tracks': tracks}))
 elif args[:1] == ['render']:
     output = Path(args[2])
-    if output.suffix == '.wav':
+    if output.name.endswith('.f32.wav'):
+        frames = struct.pack('<ff', 1.2, 0.45) * 44100
+        wavformat = struct.pack('<HHIIHH', 3, 2, 44100, 44100 * 8, 8, 32)
+        output.write_bytes(b'RIFF' + struct.pack('<I', 36 + len(frames)) +
+                           b'WAVEfmt ' + struct.pack('<I', 16) + wavformat +
+                           b'data' + struct.pack('<I', len(frames)) + frames)
+    elif output.suffix == '.wav':
         with wave.open(str(output), 'wb') as wav:
             wav.setnchannels(2)
             wav.setsampwidth(2)
@@ -128,14 +134,8 @@ else:
         for command in commands:
             args = json.loads(command)
             self.assertIn('--gain', args)
-            if 'short' in args[3]:
-                expected_gain = 3.0
-            elif 'long' in args[3]:
-                expected_gain = -1.25
-            else:
-                expected_gain = 1.0
-            self.assertAlmostEqual(float(args[args.index('--gain') + 1]),
-                                   expected_gain, places=2)
+            # All tracks retain unity gain regardless of measured loudness.
+            self.assertEqual(float(args[args.index('--gain') + 1]), 0.0)
             self.assertEqual(args[args.index('--intro') + 1], '0')
             # The original bug came from --bpm missing here, so mix add used
             # half-time values cached by the older Rust analyzer.
@@ -198,16 +198,16 @@ else:
             baseline['transitions'][1]['incoming_start_seconds'],
             adjusted['transitions'][1]['incoming_start_seconds'])
 
-    def test_fixed_mode_remains_available(self):
+    def test_uniform_track_gain_override(self):
         self.prepare()
         result = self.invoke('--seed', '42', '--master', 'none',
-                             '--level-mode', 'fixed', '--track-gain-db', '-3')
+                             '--track-gain-db', '-3')
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest = json.loads(self.out.with_suffix('.tracklist.json').read_text())
         self.assertTrue(all(x['track_gain_db'] == -3 for x in manifest['tracks']))
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
-    def test_mastering_raises_peak_to_near_full_scale(self):
+    def test_master_only_attenuates_over_range_mix_equally(self):
         self.prepare()
         output = self.out.with_suffix('.wav')
         result = self.invoke('--seed', '42', output=output)
@@ -215,9 +215,35 @@ else:
         with wave.open(str(output), 'rb') as wav:
             self.assertEqual(wav.getnchannels(), 2)
             samples = wav.readframes(1000)
-        max_peak = max(abs(n) for n in struct.unpack('<' + 'h' * (len(samples) // 2), samples)) / 32768
-        self.assertGreater(max_peak, 0.85)
-        self.assertLess(max_peak, 0.95)
+        decoded = struct.unpack('<' + 'h' * (len(samples) // 2), samples)
+        loud_peak = abs(decoded[0]) / 32768
+        quiet_peak = abs(decoded[1]) / 32768
+        self.assertGreater(loud_peak, 0.85)
+        self.assertLess(loud_peak, 0.95)
+        self.assertAlmostEqual(quiet_peak / loud_peak, 0.45 / 1.2, delta=0.001)
+        manifest = json.loads(output.with_suffix('.tracklist.json').read_text())
+        self.assertTrue(all(x['track_gain_db'] == 0.0 for x in manifest['tracks']))
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
+    def test_master_never_boosts_a_mix_below_ceiling(self):
+        self.prepare()
+        # A quieter floating-point mix remains at its original volume.
+        low_binary = Path(self.tmp.name) / 'low'
+        low_binary.write_text(self.binary.read_text().replace(
+            "struct.pack('<ff', 1.2, 0.45)",
+            "struct.pack('<ff', 0.5, 0.25)"))
+        low_binary.chmod(0o755)
+        output = self.out.with_suffix('.wav')
+        command = [sys.executable, str(SCRIPT), str(self.music),
+                   '-o', str(output), '--dermixen', str(low_binary), '--seed', '42']
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('global attenuation +0.00 dB', result.stdout)
+        with wave.open(str(output), 'rb') as wav:
+            frame = wav.readframes(1)
+        left, right = struct.unpack('<hh', frame)
+        self.assertAlmostEqual(left / 32768, 0.5, delta=0.0001)
+        self.assertAlmostEqual(right / 32768, 0.25, delta=0.0001)
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
     def test_ogg_conversion_is_cached(self):
