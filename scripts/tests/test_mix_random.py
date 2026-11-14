@@ -207,10 +207,42 @@ else:
         self.assertTrue(all(x['track_gain_db'] == -3 for x in manifest['tracks']))
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
-    def test_master_only_attenuates_over_range_mix_equally(self):
+    def test_default_mp3_preserves_original_over_range_peaks(self):
+        self.prepare()
+        result = self.invoke('--seed', '42')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('original levels preserved', result.stdout)
+        # Real FFmpeg MP3 encoding/decoding, not the mock renderer.
+        raw = subprocess.check_output([
+            'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
+            '-i', str(self.out), '-f', 'f32le', '-acodec', 'pcm_f32le', '-'])
+        frame = (len(raw) // 16) * 8
+        left, right = struct.unpack_from('<ff', raw, frame)
+        self.assertGreater(left, 1.1)
+        self.assertAlmostEqual(left, 1.2, delta=0.05)
+        self.assertAlmostEqual(right, 0.45, delta=0.04)
+        manifest = json.loads(self.out.with_suffix('.tracklist.json').read_text())
+        self.assertEqual(manifest['master'], 'original')
+        self.assertTrue(all(x['track_gain_db'] == 0 for x in manifest['tracks']))
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
+    def test_default_float_wav_preserves_original_over_range_peaks(self):
+        self.prepare()
+        out = self.out.with_suffix('.wav')
+        result = self.invoke('--seed', '42', output=out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        raw = subprocess.check_output([
+            'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
+            '-i', str(out), '-f', 'f32le', '-acodec', 'pcm_f32le', '-'])
+        left, right = struct.unpack_from('<ff', raw, (len(raw)//16)*8)
+        self.assertAlmostEqual(left, 1.2, delta=0.0001)
+        self.assertAlmostEqual(right, 0.45, delta=0.0001)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
+    def test_safe_master_attenuates_over_range_mix_equally(self):
         self.prepare()
         output = self.out.with_suffix('.wav')
-        result = self.invoke('--seed', '42', output=output)
+        result = self.invoke('--seed', '42', '--master', 'safe', output=output)
         self.assertEqual(result.returncode, 0, result.stderr)
         with wave.open(str(output), 'rb') as wav:
             self.assertEqual(wav.getnchannels(), 2)
@@ -235,7 +267,8 @@ else:
         low_binary.chmod(0o755)
         output = self.out.with_suffix('.wav')
         command = [sys.executable, str(SCRIPT), str(self.music),
-                   '-o', str(output), '--dermixen', str(low_binary), '--seed', '42']
+                   '-o', str(output), '--dermixen', str(low_binary), '--seed', '42',
+                   '--master', 'safe']
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('global attenuation +0.00 dB', result.stdout)
