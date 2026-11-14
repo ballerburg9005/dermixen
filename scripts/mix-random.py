@@ -232,30 +232,50 @@ def join_preset(requested: str, previous: dict, following: dict) -> str:
     return 'beatmix'
 
 
-def master_peak(source: Path, output: Path, target_db: float) -> None:
-    """Normalize the finished mix to near full scale, without raising per-track gain.
+def individual_gain(record: dict, mode: str, target_peak_db: float,
+                    fixed_db: float, target_lufs: float) -> float:
+    """Normalize each source independently without changing its dynamics.
 
-    Render to WAV first so we encode the final MP3 only once. Peak normalization
-    preserves the dynamics and transitions; it is not a loudness compressor.
+    Peak leveling matches measured true peaks, so songs with quieter waveforms
+    no longer remain at 60% of the preceding song. Loudness leveling matches
+    integrated loudness instead. Neither applies compression to the track.
+    """
+    if mode == 'fixed':
+        return fixed_db
+    loudness = record.get('loudness') or {}
+    field = 'true_peak_db' if mode == 'peak' else 'integrated_lufs'
+    value = loudness.get(field)
+    if value is None or not math.isfinite(float(value)):
+        raise RuntimeError(
+            f'Dermixen did not measure {field}; use --level-mode fixed '
+            'if this audio cannot be measured.')
+    target = target_peak_db if mode == 'peak' else target_lufs
+    gain = float(target) - float(value)
+    # Limit extreme corrections to avoid magnifying noise in silent sources.
+    return round(max(-15.0, min(9.0, gain)), 4)
+
+
+def master_limit(source: Path, output: Path, target_db: float) -> None:
+    """Limit only peaks above the target while preserving the float mix.
+
+    Dermixen's 16-bit WAV and MP3 outputs clamp before mastering. Rendering
+    to *.f32.wav keeps the original floating-point samples intact. FFmpeg's
+    lookahead limiter then prevents overlaps from hard-clipping, without
+    reducing the level of every song to accommodate the loudest transition.
     """
     if not shutil.which('ffmpeg'):
-        raise RuntimeError('ffmpeg is required for final peak normalization (--master none disables it)')
-    result = subprocess.run(
-        ['ffmpeg', '-nostdin', '-hide_banner', '-i', str(source),
-         '-af', 'volumedetect', '-f', 'null', '-'],
-        check=True, capture_output=True, text=True)
-    matches = re.findall(r'max_volume:\s*(-?[\d.]+) dB', result.stderr)
-    if not matches:
-        raise RuntimeError('could not measure master peak')
-    observed = float(matches[-1])
-    adjustment = target_db - observed
-    print(f'Mastering: WAV peak {observed:+.1f} dBFS; applying {adjustment:+.1f} dB to reach {target_db:+.1f} dBFS.', flush=True)
+        raise RuntimeError('ffmpeg is required for the float master limiter')
+    threshold = 10 ** (target_db / 20.0)
+    filterchain = f'alimiter=limit={threshold:.8f}:attack=5:release=100:level=0'
     command = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-               '-i', str(source), '-af', f'volume={adjustment:.5f}dB']
+               '-i', str(source), '-af', filterchain]
     if output.suffix.lower() == '.mp3':
         command += ['-c:a', 'libmp3lame', '-b:a', '320k', str(output)]
     else:
         command += ['-c:a', 'pcm_s16le', str(output)]
+    print(f'Mastering: limiting overlapping peaks to {target_db:.1f} dBFS '
+          'from the floating-point mix, preserving individual song levels.',
+          flush=True)
     run(command)
 
 
@@ -274,12 +294,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--advance-transition', action='append', default=[],
                         metavar='N:BARS',
                         help='Move only transition N by BARS, e.g. 2:2 for track 2 -> 3')
+    parser.add_argument('--level-mode', choices=('peak', 'loudness', 'fixed'), default='peak',
+                        help='Match individual decoded peaks (default), loudness or fixed gain')
     parser.add_argument('--track-gain-db', type=float, default=-7.0,
-                        help='Fixed per-track headroom; final mix is peak-mastered (default -7 dB)')
+                        help='Gain in fixed mode only (default -7 dB)')
+    parser.add_argument('--target-lufs', type=float, default=-9.0,
+                        help='Target integrated LUFS in loudness mode (default -9)')
     parser.add_argument('--master', choices=('peak', 'none'), default='peak',
-                        help='Mastering mode (peak default, none for direct Dermixen render)')
+                        help='Float WAV and lookahead peak limiter (default) or raw render')
     parser.add_argument('--peak-db', type=float, default=-1.0,
-                        help='Final peak target dBFS, used with --master peak (default -1)')
+                        help='Peak target/limiter ceiling in dBFS (default -1)')
     parser.add_argument('--force', action='store_true', help='Replace existing mix/output')
     parser.add_argument('--dermixen', help='Existing Dermixen executable')
     args = parser.parse_args(argv)
@@ -299,6 +323,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error('--track-gain-db must be between -18 and 0')
     if not math.isfinite(args.peak_db) or not -12 <= args.peak_db <= -0.5:
         parser.error('--peak-db must be between -12 and -0.5')
+    if not math.isfinite(args.target_lufs) or not -30 <= args.target_lufs <= -5:
+        parser.error('--target-lufs must be between -30 and -5')
     document = output.with_suffix('.dmx')
     manifest = output.with_suffix('.tracklist.json')
     cache = output.with_suffix('.sources')
@@ -341,6 +367,9 @@ def main(argv: list[str] | None = None) -> int:
                           if next_entry is not None else None)
             entry['timing'] = track_timing(entry['record'], args.bars,
                                            outgoing_preset, silence_at, advance)
+            entry['track_gain_db'] = individual_gain(
+                entry['record'], args.level_mode, args.peak_db,
+                args.track_gain_db, args.target_lufs)
 
         if document.exists():
             document.unlink()
@@ -360,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
                  '--intro', '0', '--outro', str(timing['outro_beat']),
                  '--bpm', str(timing['bpm']),
                  '--first-beat', str(entry['record']['grid']['first_beat_sample'] / SAMPLE_RATE),
-                 '--gain', str(args.track_gain_db)])
+                 '--gain', str(entry['track_gain_db'])])
             # Catch disagreements caused by stale library data immediately.
             layout = validate_layout(dermixen, document, entries, index + 1)
             if index:
@@ -372,6 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             playlist.append({
                 'source': str(source), 'analyzed_file': str(entry['prepared']),
                 'incoming_preset': incoming_preset, 'outgoing_preset': entry['outgoing_preset'],
+                'track_gain_db': entry['track_gain_db'],
+                'source_loudness': entry['record'].get('loudness'),
                 **timing,
             })
 
@@ -379,13 +410,15 @@ def main(argv: list[str] | None = None) -> int:
             run([dermixen, 'render', str(document), str(output)])
         else:
             with tempfile.TemporaryDirectory(prefix='.dermixen-master-', dir=output.parent) as temp:
-                wav = Path(temp) / 'premaster.wav'
+                wav = Path(temp) / 'premaster.f32.wav'
                 run([dermixen, 'render', str(document), str(wav)])
-                master_peak(wav, output, args.peak_db)
+                master_limit(wav, output, args.peak_db)
 
         manifest.write_text(json.dumps({'preset': args.preset, 'bars': args.bars,
                                         'seed': args.seed, 'master': args.master,
                                         'track_gain_db': args.track_gain_db,
+                                        'level_mode': args.level_mode,
+                                        'target_lufs': args.target_lufs,
                                         'tracks': playlist}, indent=2) + '\n',
                             encoding='utf-8')
         print(f'Finished: {output}\nEditable mix: {document}\nTracklist: {manifest}', flush=True)
