@@ -66,10 +66,10 @@ def transcode(source: Path, cache: Path) -> Path:
         raise RuntimeError('ffmpeg is required for OGG/Opus/WebM/AAC/WMA/AIFF inputs')
     cache.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(os.fsencode(source)).hexdigest()[:20]
-    dest = cache / (digest + '.wav')
+    dest = cache / (digest + '.f32.wav')
     if dest.is_file() and dest.stat().st_mtime_ns >= source.stat().st_mtime_ns:
         return dest
-    tmp = cache / (digest + '.partial.wav')
+    tmp = cache / (digest + '.partial.f32.wav')
     try:
         run(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
              '-i', str(source), '-map', '0:a:0', '-vn', '-ac', '2', '-ar', '44100',
