@@ -40,6 +40,10 @@ if args[0] == 'analyze':
     print(json.dumps({'length_samples': duration * 44100,
         'grid': {'first_beat_sample': 4410, 'bpm': bpm},
         'anchors': {'intro_beat': 20, 'outro_beat': 68},
+        'loudness': {'true_peak_db': (-4.0 if 'short' in str(args[1])
+                   else (0.25 if 'long' in str(args[1]) else -2.0)),
+                     'integrated_lufs': (-11.0 if 'short' in str(args[1])
+                     else (-7.0 if 'long' in str(args[1]) else -8.5))},
         'extent': {'begins_sample': 0, 'ends_sample': (duration - 10) * 44100}}))
 elif args[:2] == ['mix', 'new']:
     Path(args[2]).write_text('mix\n')
@@ -74,7 +78,7 @@ elif args[:1] == ['render']:
             wav.setnchannels(2)
             wav.setsampwidth(2)
             wav.setframerate(44100)
-            wav.writeframes(struct.pack('<h', 8192) * (44100 * 2))
+            wav.writeframes(struct.pack('<h', 32000) * (44100 * 2))
     else:
         output.write_bytes(b'MOCK-MP3')
 else:
@@ -114,13 +118,24 @@ else:
         self.assertLess(short['outro_beat'], 600)
         self.assertTrue(self.out.with_suffix('.dmx').exists())
         self.assertEqual(self.out.read_bytes(), b'MOCK-MP3')
+        cue_file = self.out.with_suffix('.transitions.txt')
+        self.assertTrue(cue_file.exists())
+        self.assertIn('SEEK', cue_file.read_text())
+        self.assertIn('INCOMING', cue_file.read_text())
 
         commands = self.out.with_suffix('.dmx').read_text().splitlines()[1:]
         self.assertEqual(len(commands), 3)
         for command in commands:
             args = json.loads(command)
             self.assertIn('--gain', args)
-            self.assertEqual(args[args.index('--gain') + 1], '-7.0')
+            if 'short' in args[3]:
+                expected_gain = 3.0
+            elif 'long' in args[3]:
+                expected_gain = -1.25
+            else:
+                expected_gain = 1.0
+            self.assertAlmostEqual(float(args[args.index('--gain') + 1]),
+                                   expected_gain, places=2)
             self.assertEqual(args[args.index('--intro') + 1], '0')
             # The original bug came from --bpm missing here, so mix add used
             # half-time values cached by the older Rust analyzer.
@@ -164,6 +179,32 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('beat grid is stale', result.stderr)
         self.assertFalse(self.out.exists(), 'must never render a silent mix')
+
+    def test_second_handover_can_be_two_bars_earlier(self):
+        self.prepare()
+        reference = self.invoke('--seed', '42', '--master', 'none')
+        self.assertEqual(reference.returncode, 0, reference.stderr)
+        baseline = json.loads(self.out.with_suffix('.tracklist.json').read_text())
+        comparison = self.out.with_name('advanced.mp3')
+        changed = self.invoke('--seed', '42', '--master', 'none',
+                              '--advance-transition', '2:2', output=comparison)
+        self.assertEqual(changed.returncode, 0, changed.stderr)
+        adjusted = json.loads(comparison.with_suffix('.tracklist.json').read_text())
+        self.assertEqual(baseline['tracks'][0]['outro_beat'],
+                         adjusted['tracks'][0]['outro_beat'])
+        self.assertEqual(baseline['tracks'][1]['outro_beat'] - 8,
+                         adjusted['tracks'][1]['outro_beat'])
+        self.assertGreater(
+            baseline['transitions'][1]['incoming_start_seconds'],
+            adjusted['transitions'][1]['incoming_start_seconds'])
+
+    def test_fixed_mode_remains_available(self):
+        self.prepare()
+        result = self.invoke('--seed', '42', '--master', 'none',
+                             '--level-mode', 'fixed', '--track-gain-db', '-3')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads(self.out.with_suffix('.tracklist.json').read_text())
+        self.assertTrue(all(x['track_gain_db'] == -3 for x in manifest['tracks']))
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg not installed')
     def test_mastering_raises_peak_to_near_full_scale(self):
