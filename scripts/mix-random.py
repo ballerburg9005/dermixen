@@ -119,7 +119,8 @@ def trailing_silence_start(source: Path, duration: float) -> float | None:
 
 
 def track_timing(record: dict, bars: int, outgoing_preset: str,
-                 detected_silence_at: float | None = None) -> dict:
+                 detected_silence_at: float | None = None,
+                 advance_bars: int = 0) -> dict:
     """Conservative anchors: most music plays fully, even if kick anchors misfire.
 
     An analyzer's arbitrary early outro is ignored. A fade starts near the
@@ -142,12 +143,15 @@ def track_timing(record: dict, bars: int, outgoing_preset: str,
     outgoing_beat = (math.ceil if outgoing_preset == 'cut' else math.floor)
     outro_beat = outgoing_beat((desired_fade_start - first_seconds) * bpm / 60.0)
     last_beat = math.floor((duration - first_seconds) * bpm / 60.0)
+    if outgoing_preset != 'cut':
+        outro_beat -= 4 * advance_bars
     outro_beat = min(last_beat, max(1, outro_beat))
     if outro_beat <= fade_beats + 1:
         raise RuntimeError('track too short for requested transition bars; use --bars 1')
     return {
         'bpm': bpm, 'duration_seconds': duration, 'sound_end_seconds': sound_end,
         'trailing_silence_seconds': duration - sound_end,
+        'outro_advance_bars': advance_bars if outgoing_preset != 'cut' else 0,
         'analyzed_intro_beat': (record.get('anchors') or {}).get('intro_beat'),
         'analyzed_outro_beat': (record.get('anchors') or {}).get('outro_beat'),
         'intro_beat': 0, 'outro_beat': outro_beat,
@@ -200,6 +204,24 @@ def validate_layout(dermixen: str, document: Path, entries: list[dict],
     return layout
 
 
+def parse_advance_overrides(specifications: list[str], count: int) -> dict[int, int]:
+    """Read 1-based outgoing handover numbers from N:BARS options."""
+    overrides = {}
+    for spec in specifications:
+        match = re.fullmatch(r'([1-9][0-9]*):([0-9]+)', spec)
+        if match is None:
+            raise ValueError(f'--advance-transition {spec!r} must be N:BARS')
+        index, bars = map(int, match.groups())
+        if index >= count:
+            raise ValueError(f'transition {index} does not exist in this {count}-track mix')
+        if not 0 <= bars <= 8:
+            raise ValueError('--advance-transition bars must be between 0 and 8')
+        if index in overrides:
+            raise ValueError(f'--advance-transition {index} was given twice')
+        overrides[index] = bars
+    return overrides
+
+
 def join_preset(requested: str, previous: dict, following: dict) -> str:
     if requested != 'auto':
         return requested
@@ -247,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
                         default='auto', help='Auto uses smooth beatmatched fades, never hard cuts')
     parser.add_argument('--bars', type=int, default=8,
                         help='Transition bars (default 8; about 6-11 seconds at 180-300 BPM)')
+    parser.add_argument('--advance-bars', type=int, default=0,
+                        help='Move all outgoing transitions this many bars earlier (default 0)')
+    parser.add_argument('--advance-transition', action='append', default=[],
+                        metavar='N:BARS',
+                        help='Move only transition N by BARS, e.g. 2:2 for track 2 -> 3')
     parser.add_argument('--track-gain-db', type=float, default=-7.0,
                         help='Fixed per-track headroom; final mix is peak-mastered (default -7 dB)')
     parser.add_argument('--master', choices=('peak', 'none'), default='peak',
@@ -266,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error('--limit must be at least 2')
     if not 1 <= args.bars <= 16:
         parser.error('--bars must be between 1 and 16')
+    if not 0 <= args.advance_bars <= 8:
+        parser.error('--advance-bars must be between 0 and 8')
     if not math.isfinite(args.track_gain_db) or not -18 <= args.track_gain_db <= 0:
         parser.error('--track-gain-db must be between -18 and 0')
     if not math.isfinite(args.peak_db) or not -12 <= args.peak_db <= -0.5:
@@ -284,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         rng.shuffle(tracks)
         if args.limit is not None:
             tracks = tracks[:args.limit]
+        advances = parse_advance_overrides(args.advance_transition, len(tracks))
         print(f'Mixing {len(tracks)} shuffled tracks with {args.bars}-bar fades, preserving track endings.', flush=True)
         output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -305,11 +335,12 @@ def main(argv: list[str] | None = None) -> int:
                 b = {'bpm': float(next_entry['record']['grid']['bpm'])}
                 outgoing_preset = join_preset(args.preset, a, b)
             entry['outgoing_preset'] = outgoing_preset
+            advance = advances.get(index + 1, args.advance_bars) if next_entry else 0
             silence_at = (trailing_silence_start(entry['prepared'],
                                                   entry['record']['length_samples'] / SAMPLE_RATE)
                           if next_entry is not None else None)
             entry['timing'] = track_timing(entry['record'], args.bars,
-                                           outgoing_preset, silence_at)
+                                           outgoing_preset, silence_at, advance)
 
         if document.exists():
             document.unlink()
@@ -322,7 +353,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f'[{index+1}/{len(entries)}] {source.name} | {timing["bpm"]:.1f} BPM | '
                   f'{incoming_preset} in | outro at beat {timing["outro_beat"]} '
                   f'(analyzer suggested {timing["analyzed_outro_beat"]}; '
-                  f'fade target {timing["sound_end_seconds"]:.1f}s)', flush=True)
+                  f'fade target {timing["sound_end_seconds"]:.1f}s; '
+                  f'advance {timing["outro_advance_bars"]} bars)', flush=True)
             run([dermixen, 'mix', 'add', str(document), str(entry['prepared']),
                  '--preset', incoming_preset, '--bars', str(args.bars),
                  '--intro', '0', '--outro', str(timing['outro_beat']),
