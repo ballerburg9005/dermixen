@@ -640,10 +640,13 @@ mod tests {
         assert_eq!(wav_depth(Path::new("mix.f32.wav")), WavDepth::Float32);
         let max_float = WavFile::capacity(WavDepth::Float32);
         assert!(refuse_a_mix_too_long_for_a_wav(Path::new("mix.f32.wav"), max_float).is_ok());
-        let error = refuse_a_mix_too_long_for_a_wav(
-            Path::new("mix.f32.wav"), Samples(max_float.0 + 1)
-        ).unwrap_err();
-        assert!(error.contains("32 bits") && error.contains("4 GiB"), "{error}");
+        let error =
+            refuse_a_mix_too_long_for_a_wav(Path::new("mix.f32.wav"), Samples(max_float.0 + 1))
+                .unwrap_err();
+        assert!(
+            error.contains("32 bits") && error.contains("4 GiB"),
+            "{error}"
+        );
     }
 
     #[test]
