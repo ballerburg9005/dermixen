@@ -78,21 +78,28 @@ when the incoming track starts and the outgoing source finishes. It writes
 `test-earlier.transitions.txt` and embeds the cues inside
 `test-earlier.tracklist.json`. The editable `.dmx` file is retained.
 
-**Levels and headroom:** In the default `--level-mode peak`, each source gets
-an individual gain matching its measured true peak to `--peak-db -1`.
-This brings source waveform peaks to similar levels without compressing
-each recording. `--level-mode loudness --target-lufs -9` instead matches
-integrated loudness, which is useful when songs have different crest factors.
-`--level-mode fixed --track-gain-db -7` keeps the earlier constant-gain
-behavior for comparison.
+**Original mastering and shared gain:** The default applies 0 dB gain
+to every track. It does not individually normalize songs by peaks or LUFS,
+and does not compress them to make all tracks equally loud. Each recording
+keeps its original loudness relative to the others, except for normal
+beatmatching and fades. A uniformly quieter set can use
+`--track-gain-db -3` to attenuate *every* song by the same amount.
 
-Dermixen renders a 32-bit floating-point `*.f32.wav` intermediate so audio
-above the PCM full-scale range is not irreversibly clamped at 16 bits.
-FFmpeg then limits summing peaks caused by overlapping tracks and writes
-a final 320 kbps MP3. The limiter changes peaks that exceed the ceiling,
-but does not lower every song to accommodate the loudest overlap.
-An MP3 may decode to peaks above 0 dBFS even when its encoded input was
-limited below 0 dBFS. That is a codec property, not a mastering target.
+Dermixen renders a 32-bit floating-point `*.f32.wav` intermediate so
+decoded MP3 samples above 1.0 do not clip prematurely. FFmpeg's float
+`astats` then measures the **entire mix's** peak. If that peak exceeds
+the `--peak-db -1` export ceiling, the exporter applies one constant
+attenuation to the *whole mix*, not a compressor/limiter and not a gain
+per song. If the mix already fits the ceiling, its gain remains unchanged.
+There is no upward normalization. The final 320 kbps MP3 may decode with
+peaks beyond 1.0 due to lossy reconstruction, which is normal.
+
+Source files with different loudness will remain different in the mix.
+Making every song equally loud while preserving every source's exact
+level is impossible. The default prioritizes keeping the originals'
+relative dynamics and levels. `--master none` bypasses the float
+intermediate and safety attenuation, and can cause clipping when writing
+an over-range mix directly to 16-bit WAV or MP3.
 
 Use `--bars 4` or `--bars 12` to compare fade lengths. The current script
 is not a creative Auto-DJ: phrase-aware planning, vocal separation,
