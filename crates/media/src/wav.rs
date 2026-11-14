@@ -236,6 +236,21 @@ mod limit_tests {
     }
 
     #[test]
+    fn float_wav_preserves_samples_beyond_full_scale() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("over.f32.wav");
+        let mut file = WavFile::create(&path, WavDepth::Float32).unwrap();
+        file.write(&[[1.25, -1.125], [0.5, -0.25]]).unwrap();
+        file.finish().unwrap();
+
+        let mut reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec().sample_format, hound::SampleFormat::Float);
+        assert_eq!(reader.spec().bits_per_sample, 32);
+        let samples: Vec<f32> = reader.samples::<f32>().map(Result::unwrap).collect();
+        assert_eq!(samples, vec![1.25, -1.125, 0.5, -0.25]);
+    }
+
+    #[test]
     fn a_write_past_the_capacity_is_refused_and_writes_nothing() {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("long.wav");
