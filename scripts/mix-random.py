@@ -268,6 +268,28 @@ def join_preset(requested: str, previous: dict, following: dict) -> str:
     return 'beatmix'
 
 
+def master_original(source: Path, output: Path) -> None:
+    """Encode the untouched float render without gain reduction or clipping.
+
+    FFmpeg's libmp3lame encoder accepts planar floating-point samples.
+    Decoded MP3 peaks can legitimately be above 1.0; neither individual
+    gains nor a global ceiling are applied in this preservation mode.
+    Conventional DACs can still clip if played at full digital volume.
+    """
+    if not shutil.which('ffmpeg'):
+        raise RuntimeError('ffmpeg is required for unclipped floating-point export')
+    command = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+               '-i', str(source)]
+    if output.suffix.lower() == '.mp3':
+        command += ['-c:a', 'libmp3lame', '-b:a', '320k', str(output)]
+    else:
+        command += ['-c:a', 'pcm_f32le', str(output)]
+    print('Master: original levels preserved (0 dB per-track and global gain, '
+          'no limiter, no peak ceiling). Decoded MP3 may peak above 1.0.',
+          flush=True)
+    run(command)
+
+
 def master_uniform(source: Path, output: Path, ceiling_db: float) -> None:
     """Apply only a shared attenuation when the complete mix exceeds a ceiling.
 
@@ -325,10 +347,11 @@ def main(argv: list[str] | None = None) -> int:
                         help='Move only transition N by BARS, e.g. 2:2 for track 2 -> 3')
     parser.add_argument('--track-gain-db', type=float, default=0.0,
                         help='Same gain for all tracks, default 0 dB (original levels)')
-    parser.add_argument('--master', choices=('safe', 'peak', 'none'), default='safe',
-                        help='Safe: shared attenuation only, no compressor or boosts (default)')
+    parser.add_argument('--master', choices=('original', 'safe', 'peak', 'none'),
+                        default='original',
+                        help='Original: preserve all source levels (default); safe: shared attenuation')
     parser.add_argument('--peak-db', type=float, default=-1.0,
-                        help='Export peak ceiling in dBFS (default -1)')
+                        help='Ceiling for --master safe / peak only (default -1)')
     parser.add_argument('--force', action='store_true', help='Replace existing mix/output')
     parser.add_argument('--dermixen', help='Existing Dermixen executable')
     args = parser.parse_args(argv)
@@ -428,12 +451,17 @@ def main(argv: list[str] | None = None) -> int:
             })
 
         if args.master == 'none':
+            print('Warning: direct Dermixen export can clamp samples above 1.0. '
+                  'Use --master original to preserve them.', flush=True)
             run([dermixen, 'render', str(document), str(output)])
         else:
             with tempfile.TemporaryDirectory(prefix='.dermixen-master-', dir=output.parent) as temp:
                 wav = Path(temp) / 'premaster.f32.wav'
                 run([dermixen, 'render', str(document), str(wav)])
-                master_uniform(wav, output, args.peak_db)
+                if args.master == 'original':
+                    master_original(wav, output)
+                else:
+                    master_uniform(wav, output, args.peak_db)
 
         cues = transition_cues(layout, entries, output)
         manifest.write_text(json.dumps({'preset': args.preset, 'bars': args.bars,
