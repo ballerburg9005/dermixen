@@ -154,6 +154,52 @@ def track_timing(record: dict, bars: int, outgoing_preset: str,
     }
 
 
+def validate_layout(dermixen: str, document: Path, entries: list[dict],
+                    expected_count: int) -> dict:
+    """Refuse cached BPM mismatches and long unintended gaps before rendering.
+
+    Dermixen persists its analyzed beat grids in a library. After the beat
+    analyzer changes, that cache may still contain old half-time grids.
+    Each mix must use the fresh grid on which its outro beats were calculated.
+    """
+    layout = json.loads(run([dermixen, 'mix', 'show', str(document), '--json'],
+                            capture=True))
+    placed = layout.get('tracks')
+    if not isinstance(placed, list) or len(placed) != expected_count:
+        raise RuntimeError('mix show returned the wrong number of tracks')
+    for index, track in enumerate(placed):
+        fresh = entries[index]['record']
+        actual_grid = track['grid']
+        intended_grid = fresh['grid']
+        actual_bpm = float(actual_grid['bpm'])
+        expected_bpm = float(intended_grid['bpm'])
+        if abs(actual_bpm - expected_bpm) > max(0.01, expected_bpm * 0.001):
+            raise RuntimeError(
+                f'track {index + 1} has BPM {actual_bpm:.2f} in the mix, '
+                f'but analysis gave {expected_bpm:.2f}. '
+                'The beat grid is stale. Refusing to render silence.')
+        actual_first = int(actual_grid['first_beat_sample'])
+        expected_first = int(intended_grid['first_beat_sample'])
+        if abs(actual_first - expected_first) > 2:
+            raise RuntimeError(
+                f'track {index + 1} first beat does not match the fresh analysis')
+        if int(track['length_samples']) != int(fresh['length_samples']):
+            raise RuntimeError(
+                f'track {index + 1} source length does not match fresh analysis')
+        start = float(track['start_seconds'])
+        end = float(track['end_seconds'])
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            raise RuntimeError(f'track {index + 1} has an invalid position')
+        if index:
+            last_end = float(placed[index - 1]['end_seconds'])
+            if start > last_end + 1.0:
+                raise RuntimeError(
+                    f'INVALID MIX: {start - last_end:.1f}s gap between '
+                    f'track {index} and track {index + 1}. '
+                    'Rendering stopped. Check the beat grids and anchors.')
+    return layout
+
+
 def join_preset(requested: str, previous: dict, following: dict) -> str:
     if requested != 'auto':
         return requested
@@ -280,7 +326,17 @@ def main(argv: list[str] | None = None) -> int:
             run([dermixen, 'mix', 'add', str(document), str(entry['prepared']),
                  '--preset', incoming_preset, '--bars', str(args.bars),
                  '--intro', '0', '--outro', str(timing['outro_beat']),
+                 '--bpm', str(timing['bpm']),
+                 '--first-beat', str(entry['record']['grid']['first_beat_sample'] / SAMPLE_RATE),
                  '--gain', str(args.track_gain_db)])
+            # Catch disagreements caused by stale library data immediately.
+            layout = validate_layout(dermixen, document, entries, index + 1)
+            if index:
+                previous = layout['tracks'][index - 1]
+                current = layout['tracks'][index]
+                print(f'  Verified handover: {float(current["start_seconds"]):.1f}s; '
+                      f'previous track ends at {float(previous["end_seconds"]):.1f}s.',
+                      flush=True)
             playlist.append({
                 'source': str(source), 'analyzed_file': str(entry['prepared']),
                 'incoming_preset': incoming_preset, 'outgoing_preset': entry['outgoing_preset'],
