@@ -182,6 +182,19 @@ fn wants_mp3(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
 }
 
+/// Use floating point only for files explicitly named *.f32.wav.
+/// Such files preserve peaks above 0 dBFS for later lossless mastering.
+fn wav_depth(path: &Path) -> WavDepth {
+    if path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".f32.wav"))
+    {
+        WavDepth::Float32
+    } else {
+        WavDepth::Int16
+    }
+}
+
 /// The file a render writes its frames into: a 16-bit WAV, or, in a build
 /// with the `mp3` feature, an MP3 at [`dermixen_media::MP3_BITRATE_KBPS`]
 /// constant bit rate.
@@ -223,7 +236,7 @@ impl Output {
                 ));
             }
         }
-        WavFile::from_file(file, out, WavDepth::Int16)
+        WavFile::from_file(file, out, wav_depth(out))
             .map(Output::Wav)
             .map_err(|problem| problem.to_string())
     }
@@ -324,12 +337,14 @@ pub(crate) fn refuse_a_mix_too_long_for_a_wav(out: &Path, frames: Samples) -> Re
     if wants_mp3(out) {
         return Ok(());
     }
-    let capacity = WavFile::capacity(WavDepth::Int16);
+    let depth = wav_depth(out);
+    let capacity = WavFile::capacity(depth);
     if frames <= capacity {
         return Ok(());
     }
+    let bits = if depth == WavDepth::Float32 { 32 } else { 16 };
     Err(format!(
-        "{} would be {} long, which is {} frames, and a WAV file describes at most 4 GiB, which is {} frames at sixteen bits ({} long). Write the mix to a name ending in .mp3, which has no such limit, or render a span of it with --from and --for.",
+        "{} would be {} long, which is {} frames, and a WAV file describes at most 4 GiB, which is {} frames at {bits} bits ({} long). Write the mix to a name ending in .mp3, which has no such limit, or render a span of it with --from and --for.",
         out.display(),
         length_text(frames.to_seconds()),
         frames.0,
@@ -617,6 +632,18 @@ mod tests {
             "{message}"
         );
         assert!(refuse_a_mix_too_long_for_a_wav(Path::new("out.mp3"), over).is_ok());
+    }
+
+    #[test]
+    fn float_wav_is_opt_in_and_has_the_smaller_correct_capacity() {
+        assert_eq!(wav_depth(Path::new("mix.wav")), WavDepth::Int16);
+        assert_eq!(wav_depth(Path::new("mix.f32.wav")), WavDepth::Float32);
+        let max_float = WavFile::capacity(WavDepth::Float32);
+        assert!(refuse_a_mix_too_long_for_a_wav(Path::new("mix.f32.wav"), max_float).is_ok());
+        let error = refuse_a_mix_too_long_for_a_wav(
+            Path::new("mix.f32.wav"), Samples(max_float.0 + 1)
+        ).unwrap_err();
+        assert!(error.contains("32 bits") && error.contains("4 GiB"), "{error}");
     }
 
     #[test]
