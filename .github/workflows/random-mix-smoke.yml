@@ -1,0 +1,24 @@
+name: Randomized mix smoke tests
+on:
+  push:
+    paths:
+      - 'scripts/mix-random.py'
+      - 'scripts/tests/test_mix_random.py'
+      - '.github/workflows/random-mix-smoke.yml'
+  pull_request:
+    paths:
+      - 'scripts/mix-random.py'
+      - 'scripts/tests/test_mix_random.py'
+      - '.github/workflows/random-mix-smoke.yml'
+  workflow_dispatch:
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Check Python syntax
+        run: python3 -m py_compile scripts/mix-random.py scripts/tests/test_mix_random.py
+      - name: Run random-mix orchestration regression tests
+        run: python3 -m unittest discover -s scripts/tests -p 'test_mix_random.py' -v
