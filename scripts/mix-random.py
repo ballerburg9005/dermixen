@@ -222,6 +222,42 @@ def parse_advance_overrides(specifications: list[str], count: int) -> dict[int, 
     return overrides
 
 
+def mix_timestamp(seconds: float) -> str:
+    tenths = round(max(0, seconds) * 10)
+    minutes, rest = divmod(tenths, 600)
+    return f'{minutes}:{rest / 10:04.1f}'
+
+
+def transition_cues(layout: dict, entries: list[dict], output: Path) -> list[dict]:
+    """Print seek points based on actual start/end positions in mix show."""
+    lines = ['Transition cues (seek four seconds before each incoming track):']
+    cues = []
+    tracks = layout['tracks']
+    for index in range(1, len(tracks)):
+        incoming_at = float(tracks[index]['start_seconds'])
+        outgoing_ends = float(tracks[index - 1]['end_seconds'])
+        seek_at = max(0.0, incoming_at - 4.0)
+        before = Path(entries[index - 1]['source']).stem
+        after = Path(entries[index]['source']).stem
+        lines.append(f'  {index}. SEEK {mix_timestamp(seek_at)}'
+                     f'  | INCOMING {mix_timestamp(incoming_at)}'
+                     f'  | previous source ends {mix_timestamp(outgoing_ends)}')
+        lines.append(f'     {before} -> {after}')
+        cues.append({
+            'number': index, 'from': str(entries[index - 1]['source']),
+            'to': str(entries[index]['source']),
+            'seek_seconds': round(seek_at, 3),
+            'incoming_start_seconds': round(incoming_at, 3),
+            'previous_source_end_seconds': round(outgoing_ends, 3),
+            'outro_advance_bars': entries[index - 1]['timing']['outro_advance_bars'],
+        })
+    path = output.with_suffix('.transitions.txt')
+    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    print('\n' + '\n'.join(lines), flush=True)
+    print(f'Saved transition cues: {path}', flush=True)
+    return cues
+
+
 def join_preset(requested: str, previous: dict, following: dict) -> str:
     if requested != 'auto':
         return requested
@@ -414,12 +450,13 @@ def main(argv: list[str] | None = None) -> int:
                 run([dermixen, 'render', str(document), str(wav)])
                 master_limit(wav, output, args.peak_db)
 
+        cues = transition_cues(layout, entries, output)
         manifest.write_text(json.dumps({'preset': args.preset, 'bars': args.bars,
                                         'seed': args.seed, 'master': args.master,
                                         'track_gain_db': args.track_gain_db,
                                         'level_mode': args.level_mode,
                                         'target_lufs': args.target_lufs,
-                                        'tracks': playlist}, indent=2) + '\n',
+                                        'tracks': playlist, 'transitions': cues}, indent=2) + '\n',
                             encoding='utf-8')
         print(f'Finished: {output}\nEditable mix: {document}\nTracklist: {manifest}', flush=True)
         return 0
