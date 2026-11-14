@@ -199,8 +199,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--limit', type=int, help='Maximum tracks; default all')
     parser.add_argument('--preset', choices=('auto', 'beatmix', 'bass-swap', 'blend', 'cut'),
                         default='auto', help='Auto uses smooth beatmatched fades, never hard cuts')
-    parser.add_argument('--bars', type=int, default=4,
-                        help='Transition bars (default 4; for beatmix/bass-swap)')
+    parser.add_argument('--bars', type=int, default=8,
+                        help='Transition bars (default 8; about 6-11 seconds at 180-300 BPM)')
     parser.add_argument('--track-gain-db', type=float, default=-7.0,
                         help='Fixed per-track headroom; final mix is peak-mastered (default -7 dB)')
     parser.add_argument('--master', choices=('peak', 'none'), default='peak',
@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         rng.shuffle(tracks)
         if args.limit is not None:
             tracks = tracks[:args.limit]
-        print(f'Mixing {len(tracks)} shuffled tracks with smooth fades, preserving track endings.', flush=True)
+        print(f'Mixing {len(tracks)} shuffled tracks with {args.bars}-bar fades, preserving track endings.', flush=True)
         output.parent.mkdir(parents=True, exist_ok=True)
 
         # Analyze the complete playlist before changing any files so every
