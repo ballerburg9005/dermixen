@@ -340,8 +340,8 @@ def main(argv: list[str] | None = None) -> int:
                         default='auto', help='Auto uses smooth beatmatched fades, never hard cuts')
     parser.add_argument('--bars', type=int, default=8,
                         help='Transition bars (default 8; about 6-11 seconds at 180-300 BPM)')
-    parser.add_argument('--advance-bars', type=int, default=0,
-                        help='Move all outgoing transitions this many bars earlier (default 0)')
+    parser.add_argument('--advance-bars', type=int, default=4,
+                        help='Move all outgoing transitions this many bars earlier (default 4)')
     parser.add_argument('--advance-transition', action='append', default=[],
                         metavar='N:BARS',
                         help='Move only transition N by BARS, e.g. 2:2 for track 2 -> 3')
