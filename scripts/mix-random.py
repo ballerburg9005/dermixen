@@ -333,6 +333,8 @@ def master_uniform(source: Path, output: Path, ceiling_db: float) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('folder', type=Path, help='Music folder (recursive)')
+    parser.add_argument('--files-json', type=Path,
+                        help='JSON array of absolute source paths in requested order; disables shuffle')
     parser.add_argument('-o', '--output', type=Path, default=Path('random-mix.mp3'))
     parser.add_argument('--seed', type=int, help='Random seed to reproduce order')
     parser.add_argument('--limit', type=int, help='Maximum tracks; default all')
@@ -374,15 +376,29 @@ def main(argv: list[str] | None = None) -> int:
     document = output.with_suffix('.dmx')
     manifest = output.with_suffix('.tracklist.json')
     cache = output.with_suffix('.sources')
-    tracks = discover(folder, output, cache)
+    if args.files_json is None:
+        tracks = discover(folder, output, cache)
+    else:
+        requested = json.loads(args.files_json.expanduser().read_text(encoding='utf-8'))
+        if not isinstance(requested, list) or not 2 <= len(requested) <= 100:
+            parser.error('--files-json must be a JSON array of 2-100 paths')
+        if any(not isinstance(item, str) or not item.startswith('/') for item in requested):
+            parser.error('--files-json must contain only absolute path strings')
+        tracks = [Path(item).resolve() for item in requested]
+        if any(not item.is_file() or item.suffix.lower() not in SUPPORTED
+               or item == output or cache in item.parents for item in tracks):
+            parser.error('--files-json contains an invalid source path')
+        if len(set(tracks)) != len(tracks):
+            parser.error('--files-json contains duplicate source paths')
     if len(tracks) < 2:
         parser.error(f'found only {len(tracks)} supported audio file(s); need two')
     if not args.force and any(path.exists() for path in (output, document)):
         parser.error(f'{output} or {document} exists (use --force to replace)')
     try:
         dermixen = find_dermixen(args.dermixen)
-        rng = random.Random(args.seed)
-        rng.shuffle(tracks)
+        if args.files_json is None:
+            rng = random.Random(args.seed)
+            rng.shuffle(tracks)
         if args.limit is not None:
             tracks = tracks[:args.limit]
         advances = parse_advance_overrides(args.advance_transition, len(tracks))
