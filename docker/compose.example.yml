@@ -1,0 +1,27 @@
+# Runs on the Syburg storage host after the image is built and pushed on your PC.
+# Keep the token in a private 0600 env file outside Git; do NOT publish port(s).
+services:
+  dermixen:
+    image: ballerburg9005/dermixen:latest
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cpus: "0.75"
+    mem_limit: 3g
+    pids_limit: 96
+    environment:
+      DCMIX_API: https://dancecore.party/wp-json/dcmix/v1
+      DCMIX_POLL_SECONDS: "30"
+    env_file:
+      - /root/dancecore-dermixen-runtime/worker.env
+    volumes:
+      - /srv/dancecore/media:/media:ro
+      - /srv/dancecore/mixsets/work:/work:rw
+      - /srv/dancecore/media/generated-mixes:/output:rw
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m,uid=10001,gid=10001
