@@ -103,6 +103,19 @@ else:
         for name in ('long.mp3', 'short.mp3', 'third.FLAC'):
             (self.music / name).write_bytes(b'mock-fixture')
 
+    def test_files_json_preserves_explicit_server_playlist_order(self):
+        self.prepare()
+        order = [self.music / name for name in ('third.FLAC', 'long.mp3', 'short.mp3')]
+        manifest = Path(self.tmp.name) / 'worker_sources.json'
+        manifest.write_text(json.dumps([str(path) for path in order]))
+        result = self.invoke('--files-json', str(manifest), '--seed', '999',
+                             '--master', 'none')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(self.out.with_suffix('.tracklist.json').read_text())
+        self.assertEqual([t['source'] for t in data['tracks']],
+                         [str(path) for path in order])
+        self.assertTrue(all(t['track_gain_db'] == 0 for t in data['tracks']))
+
     def test_short_track_outro_is_near_end_not_beat_68(self):
         self.prepare()
         first = self.invoke('--seed', '42', '--master', 'none')
