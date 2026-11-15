@@ -1,0 +1,34 @@
+name: Dermixen Docker worker
+on:
+  push:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - 'docker/**'
+      - 'wordpress/dancecore-dermixen-bridge/**'
+      - 'scripts/mix-random.py'
+      - 'scripts/tests/test_mix_random.py'
+      - 'crates/**'
+      - 'Cargo.lock'
+      - '.github/workflows/docker-worker.yml'
+  workflow_dispatch:
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python syntax
+        run: python3 -m py_compile docker/worker.py scripts/mix-random.py
+      - name: Offline worker security tests
+        run: python3 -m unittest discover -s docker/tests -v
+      - name: WordPress bridge syntax
+        run: php -l wordpress/dancecore-dermixen-bridge/dancecore-dermixen-bridge.php
+  image-amd64:
+    needs: protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate headless amd64 Docker image (no registry push)
+        run: docker build --platform linux/amd64 -t dermixen-worker:ci .
+      - name: Container binary health check
+        run: docker run --rm dermixen-worker:ci health
