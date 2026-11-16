@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.3.0
+ * Version: 0.3.1
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.3.0';
+const DCMIX_BRIDGE_VERSION = '0.3.1';
 
 function dcmix_table(): string {
     global $wpdb;
