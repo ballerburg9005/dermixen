@@ -77,6 +77,14 @@ function dcmix_source(int $post_id) {
     if (!preg_match('/^[a-f0-9]{64}$/',$sha)) $sha=null;
     return ['track_id'=>$post_id,'media_path'=>$path,'sha256'=>$sha];
 }
+function dcmix_playlist_signature(int $list_id): string {
+    global $wpdb;
+    $ids=$wpdb->get_col($wpdb->prepare(
+      "SELECT track_id FROM {$wpdb->prefix}dc_list_items
+       WHERE list_id=%d ORDER BY sort_order ASC,id ASC LIMIT 500",$list_id));
+    return hash('sha256',wp_json_encode(array_map('intval',$ids)));
+}
+
 function dcmix_collect_tracks(int $list_id, int $user_id) {
     global $wpdb;
     $list_table=$wpdb->prefix.'dc_lists';
@@ -163,6 +171,10 @@ add_action('rest_api_init',static function(){
 function dcmix_enqueue(WP_REST_Request $request) {
     global $wpdb;
     $user=get_current_user_id();
+    if ($request->get_param('rights_confirmed')!==true)
+        return new WP_Error('dcmix_rights',
+          'Confirm responsibility for publishing and redistribution rights before generating.',
+          ['status'=>422]);
     $list_id=absint($request->get_param('playlist_id'));
     if (!$list_id) return new WP_Error('dcmix_list','Choose a playlist',['status'=>400]);
     $source=dcmix_collect_tracks($list_id,$user);
@@ -178,12 +190,14 @@ function dcmix_enqueue(WP_REST_Request $request) {
     $daily=(int)$wpdb->get_var($wpdb->prepare(
       "SELECT COUNT(*) FROM $table WHERE user_id=%d AND created_at >= %s",
       $user,gmdate('Y-m-d H:i:s',time()-86400)));
-    if ($daily>=2) return new WP_Error('dcmix_daily','Two mix requests per 24 hours',['status'=>429]);
+    if ($daily>=6) return new WP_Error('dcmix_daily','Six mix requests per 24 hours',['status'=>429]);
     $global=(int)$wpdb->get_var("SELECT COUNT(*) FROM $table WHERE status IN ('queued','running')");
     if ($global>=5) return new WP_Error('dcmix_busy','Renderer queue full',['status'=>429]);
     $id=wp_generate_uuid4();
     $job=['id'=>$id,'tracks'=>$source['tracks'],'bars'=>$bars,
-          'advance_bars'=>$advance,'seed'=>42];
+          'advance_bars'=>$advance,'seed'=>42,
+          'playlist_signature'=>dcmix_playlist_signature($list_id),
+          'rights_confirmed_at'=>gmdate('c')];
     $ok=$wpdb->insert($table,[
       'id'=>$id,'user_id'=>$user,'source_list_id'=>$list_id,
       'status'=>'queued','created_at'=>current_time('mysql',true),
@@ -249,7 +263,7 @@ function dcmix_publish_mix($job,array $payload) {
     $playlist=$wpdb->get_row($wpdb->prepare(
       "SELECT title FROM {$wpdb->prefix}dc_lists WHERE id=%d",(int)$job->source_list_id));
     $playlist_title=$playlist?sanitize_text_field((string)$playlist->title):'Community playlist';
-    $title='DJ Mix — '.$playlist_title.' · '.gmdate('Y-m-d');
+    $title='Auto-DJ Mix — '.$playlist_title.' · '.gmdate('Y-m-d');
     $sources=json_decode((string)$job->request_json,true);
     $source_lines=[];
     foreach(($sources['tracks']??[]) as $index=>$track) {
@@ -259,10 +273,7 @@ function dcmix_publish_mix($job,array $payload) {
         $track_title=get_the_title($track_id);
         $source_lines[]=($index+1).'. '.($artist!==''?$artist.' — ':'').$track_title;
     }
-    $description='DJ mix generated automatically from the community playlist "'.$playlist_title.
-       '". Beatmatched transitions: '.(int)($sources['bars']??8).
-       ' bars; outro advance: '.(int)($sources['advance_bars']??4).
-       ' bars. Only eligible CC0 recordings were included.';
+    $description='Generated and published by the user via the auto-mix tool.';
     if (!$mix_id) {
         $created=wp_insert_post([
             'post_type'=>'mix','post_status'=>'draft','post_title'=>$title,
@@ -475,13 +486,21 @@ function dcmix_list_jobs() {
     global $wpdb;
     $table=dcmix_table();
     $rows=$wpdb->get_results($wpdb->prepare(
-      "SELECT id,source_list_id,status,created_at,finished_at,result_json,error_message
+      "SELECT id,source_list_id,status,created_at,finished_at,request_json,
+              result_json,error_message
        FROM $table WHERE user_id=%d ORDER BY created_at DESC LIMIT 30",
       get_current_user_id()
     ),ARRAY_A);
+    $signatures=[];
     foreach($rows as &$row) {
+        $original=json_decode((string)$row['request_json'],true);
+        $list_id=(int)$row['source_list_id'];
+        if (!array_key_exists($list_id,$signatures))
+            $signatures[$list_id]=dcmix_playlist_signature($list_id);
+        $recorded=(string)($original['playlist_signature']??'');
+        $row['playlist_changed']=$recorded!=='' && !hash_equals($recorded,$signatures[$list_id]);
         $row['result']=$row['result_json']?json_decode($row['result_json'],true):null;
-        unset($row['result_json']);
+        unset($row['result_json'],$row['request_json']);
         if ($row['result'] && isset($row['result']['post_id'])) {
             $post_status=get_post_status((int)$row['result']['post_id']);
             if ($row['status']!=='completed' || $post_status!=='publish') {
