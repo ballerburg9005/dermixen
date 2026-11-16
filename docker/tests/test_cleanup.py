@@ -27,6 +27,11 @@ class TestGeneratedMixCleanup(unittest.TestCase):
         self.patcher = patch.object(cleanup, "ROOT", self.root)
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
+        self.private_root = self.root / "private"
+        self.private_root.mkdir()
+        self.private_patcher = patch.object(cleanup, "PRIVATE_ROOT", self.private_root)
+        self.private_patcher.start()
+        self.addCleanup(self.private_patcher.stop)
         self.path = self.root / (self.JOB + ".mp3")
         self.path.write_bytes(b"test-generated-audio" * 120)
         self.other = self.root / "other-mix.mp3"
@@ -41,6 +46,20 @@ class TestGeneratedMixCleanup(unittest.TestCase):
         self.assertFalse(self.path.exists())
         self.assertTrue(self.other.exists())
         self.assertEqual(self.other.read_bytes(), b"untouched audio" * 20)
+
+    def test_private_mix_removed_only_from_private_root(self):
+        private=self.private_root / (self.JOB + ".mp3")
+        private.write_bytes(b"private audio")
+        receipt={"id":self.JOB,"sha256":hashlib.sha256(private.read_bytes()).hexdigest(),"storage":"private"}
+        self.assertTrue(cleanup.cleanup(receipt))
+        self.assertFalse(private.exists())
+        self.assertTrue(self.path.exists())
+        self.assertTrue(self.other.exists())
+
+    def test_invalid_storage_rejected(self):
+        with self.assertRaisesRegex(ValueError, "storage"):
+            cleanup.cleanup(dict(self.item,storage="../media"))
+        self.assertTrue(self.path.exists())
 
     def test_missing_file_is_idempotent(self):
         self.path.unlink()
