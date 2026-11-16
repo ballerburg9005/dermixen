@@ -381,3 +381,95 @@ add_action('admin_menu',static function(){
         echo '<p>Status: <strong>'.(get_option('dcmix_worker_token_hash')?'paired':'not paired').'</strong></p></div>';
     });
 });
+
+/**
+ * Inject small per-playlist Generate controls into the existing /mixes/
+ * directory without modifying any Dancecore Community files or its votes.
+ * The existing directory renderer owns the HTML rows; this bridge adds only
+ * a compact, authenticated action after they have been rendered.
+ */
+add_action('wp_footer',static function(){
+    if (!is_user_logged_in() || !is_post_type_archive('mix')) return;
+    $api=rest_url('dcmix/v1/jobs');
+    $nonce=wp_create_nonce('wp_rest');
+    ?>
+    <style>
+    .dcmix-quick {display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;margin-left:7px}
+    .dcmix-quick button {font:inherit;font-size:12px;padding:3px 8px;border:1px solid #b9a4bf;background:#f6f2f7;color:#53365a;border-radius:3px;cursor:pointer}
+    .dcmix-quick button:disabled {opacity:.65;cursor:default}
+    .dcmix-quick .dcmix-feedback {font-size:12px;color:#795580}
+    </style>
+    <script>
+    (function(){
+      const api=<?php echo wp_json_encode($api); ?>;
+      const nonce=<?php echo wp_json_encode($nonce); ?>;
+      const results=document.querySelector('.dcx-playlist-results');
+      if(!results)return;
+      const buttons=new Map();
+      async function call(method,body) {
+        const response=await fetch(api,{method,credentials:'same-origin',
+          headers:{'Content-Type':'application/json','X-WP-Nonce':nonce},
+          body:body?JSON.stringify(body):undefined});
+        const data=await response.json();
+        if(!response.ok)throw Error(data.message||'Request failed');
+        return data;
+      }
+      for(const article of results.querySelectorAll('.dcx-mix-list-result')){
+        const link=article.querySelector('.dcx-mix-list-title');
+        if(!link)continue;
+        const id=Number(new URL(link.href,location.href).searchParams.get('dc_list'));
+        if(!Number.isSafeInteger(id)||id<=0)continue;
+        const holder=document.createElement('span');
+        holder.className='dcmix-quick';
+        const button=document.createElement('button');
+        button.type='button';
+        button.textContent='Generate mix';
+        button.title='Create a finished MP3 DJ mix from eligible CC0 recordings in this playlist';
+        const feedback=document.createElement('span');
+        feedback.className='dcmix-feedback';
+        feedback.setAttribute('role','status');
+        holder.append(button,feedback);
+        article.append(holder);
+        buttons.set(id,{button,feedback});
+        button.addEventListener('click',async()=>{
+          button.disabled=true;
+          feedback.textContent='Queueing…';
+          try{
+            const r=await call('POST',{playlist_id:id,bars:8,advance_bars:4});
+            feedback.textContent='Queued '+r.included+' tracks'+(r.omitted.length?' · '+r.omitted.length+' skipped':'');
+            refresh();
+          }catch(e){
+            feedback.textContent=e.message;
+            button.disabled=false;
+          }
+        });
+      }
+      async function refresh(){
+        try{
+          const data=await call('GET');
+          for(const job of data.jobs||[]){
+            const entry=buttons.get(Number(job.source_list_id));
+            if(!entry)continue;
+            if(['queued','running'].includes(job.status)){
+              entry.button.disabled=true;
+              entry.feedback.textContent=job.status==='queued'?'Queued':'Generating…';
+            }else if(job.status==='completed'&&job.result&&job.result.post_url){
+              entry.button.disabled=false;
+              entry.feedback.replaceChildren();
+              const a=document.createElement('a');
+              a.href=job.result.post_url;
+              a.textContent='Open generated mix';
+              entry.feedback.append(a);
+            }else if(job.status==='failed'){
+              entry.button.disabled=false;
+              entry.feedback.textContent='Previous generation failed';
+            }
+          }
+        }catch(e){/* keep playlist links and buttons usable */}
+      }
+      refresh();
+      setInterval(refresh,20000);
+    })();
+    </script>
+    <?php
+},20);
