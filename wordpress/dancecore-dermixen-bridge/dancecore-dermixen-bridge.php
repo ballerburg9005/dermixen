@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.5.2
+ * Version: 0.5.3
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.5.2';
+const DCMIX_BRIDGE_VERSION = '0.5.3';
 
 function dcmix_table(): string {
     global $wpdb;
@@ -1294,3 +1294,30 @@ add_action('wp_footer',static function(){
     </script>
     <?php
 },23);
+
+/** Only the private download button requests attachment disposition.
+ *  The HTML5 audio source continues to request inline, range-enabled media.
+ */
+add_action('wp_footer',static function(){
+    if (!is_user_logged_in() || is_admin())return;
+    ?>
+    <script>
+    (function(){
+      function fixPrivateDownload(){
+        for(const link of document.querySelectorAll('a.dcx-native-download[href]')){
+          let url;try{url=new URL(link.href,location.href);}catch(_){continue;}
+          if(url.origin!==location.origin ||
+             url.searchParams.get('action')!=='dcmix_private_download')continue;
+          if(url.searchParams.get('download')!=='1'){
+            url.searchParams.set('download','1');
+            link.href=url.href;
+          }
+          const title=document.querySelector('.entry-title')?.textContent?.trim()||'Auto-DJ Mix';
+          link.download=title.replace(/[\\/:*?"<>|]/g,'').slice(0,100)+'.mp3';
+        }
+      }
+      fixPrivateDownload();document.addEventListener('dcx:navigated',fixPrivateDownload);
+    })();
+    </script>
+    <?php
+},24);
