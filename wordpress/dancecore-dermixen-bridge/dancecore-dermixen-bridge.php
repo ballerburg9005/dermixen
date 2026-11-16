@@ -277,11 +277,11 @@ function dcmix_publish_mix($job,array $payload) {
     if (!$attachment_id) {
         // An interrupted earlier attempt can leave a parented attachment.
         // Reuse it rather than creating duplicate orphan entries.
-        $existing_attachments=get_children([
+        $existing_attachments=get_posts([
           'post_parent'=>$mix_id,'post_type'=>'attachment',
-          'numberposts'=>1,'post_status'=>'inherit','fields'=>'ids'
+          'posts_per_page'=>1,'post_status'=>'inherit','fields'=>'ids'
         ]);
-        if ($existing_attachments) $attachment_id=(int)array_key_first($existing_attachments);
+        if ($existing_attachments) $attachment_id=(int)$existing_attachments[0];
     }
     if (!$attachment_id) {
         // The file is already on Syburg, not on WordPress's filesystem.
