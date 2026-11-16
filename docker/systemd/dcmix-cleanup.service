@@ -1,0 +1,24 @@
+[Unit]
+Description=Dancecore Dermixen cleanup of trashed generated MP3 files
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/root/dancecore-dermixen-runtime/worker.env
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /root/dancecore-dermixen-runtime/cleanup.py
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/dancecore/media/generated-mixes
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryMax=100M
+TasksMax=20
+TimeoutStartSec=75
