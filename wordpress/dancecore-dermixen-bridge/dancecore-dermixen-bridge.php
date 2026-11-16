@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.5.0
+ * Version: 0.5.1
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.5.0';
+const DCMIX_BRIDGE_VERSION = '0.5.1';
 
 function dcmix_table(): string {
     global $wpdb;
@@ -587,6 +587,10 @@ function dcmix_list_jobs() {
             if ($row['status']!=='completed' || $post_status!==$expected_status) {
                 unset($row['result']['post_url'],$row['result']['url']);
                 if ($row['status']==='completed')$row['status']='deleted';
+            } else {
+                // The post permalink may not have been refreshed when the
+                // worker originally updated a draft to private/published.
+                $row['result']['post_url']=get_permalink((int)$row['result']['post_id']);
             }
         }
     }
@@ -857,6 +861,7 @@ add_action('wp_footer',static function(){
     .dcmix-confirm-dialog fieldset{border:1px solid #b9a4bf;padding:5px 9px;margin:0 0 9px}
     .dcmix-confirm-dialog legend{font-weight:700;padding:0 4px}
     .dcmix-confirm-dialog fieldset label{margin:5px 0}
+    .dcmix-confirm-dialog [hidden]{display:none!important}
     .dcmix-dialog-actions{display:flex;justify-content:flex-end;gap:8px}
     .dcmix-dialog-actions button{font:inherit;font-weight:700;font-size:13px;padding:6px 11px;
       border:1px solid #8b468b;border-radius:3px;cursor:pointer}
@@ -1248,3 +1253,36 @@ add_action('wp_footer',static function(){
     </script>
     <?php
 },22);
+
+/**
+ * Guests also need truthful generator guidance. The legacy layout plugin still
+ * says rendering is in development; do not edit that plugin while other work
+ * is ongoing. This read-only UI override is scoped to the outdated help card.
+ */
+add_action('wp_footer',static function(){
+    if (is_user_logged_in() || is_admin()) return;
+    $login=wp_login_url(home_url('/mix-generator/'));
+    ?>
+    <script>
+    (function(){
+      const login=<?php echo wp_json_encode($login); ?>;
+      function update(){
+        const guide=document.getElementById('dcx-community-guide');
+        if(!guide)return;
+        const heading=guide.querySelector('.dcx-guide-heading');
+        const message=guide.querySelector('.dcx-guide-message');
+        const cta=guide.querySelector('.dcx-guide-cta');
+        const stale=/AI Mix Generator|Create your first mix|Mixes & playlists|Curate a playlist/i.test(heading?.textContent||'')||
+          /(?:AI audio rendering is in development|no downloadable generated mix yet|AI Auto-DJ is in development|coming later)/i.test(message?.textContent||'');
+        if(!stale)return;
+        if(heading)heading.textContent='Auto-DJ Mix Generator';
+        if(message)message.textContent='Sign in to generate a downloadable MP3 Mix Set from eligible playlist tracks.';
+        if(cta){cta.textContent='Sign in to generate a mix';cta.href=login;}
+      }
+      const guide=document.getElementById('dcx-community-guide');
+      if(guide)new MutationObserver(update).observe(guide,{childList:true,subtree:true,characterData:true});
+      update();document.addEventListener('dcx:navigated',update);
+    })();
+    </script>
+    <?php
+},23);
