@@ -35,10 +35,19 @@ class WorkerTests(unittest.TestCase):
                      "bars": 8, "advance_bars": 4, "seed": 42}
 
     def test_valid_job_paths_and_checksum(self):
-        identifier, files, bars, earlier, seed = worker.validate_job(self.good)
+        identifier, files, bars, earlier, seed, visibility = worker.validate_job(self.good)
         self.assertEqual(identifier, self.good["id"])
         self.assertEqual(files, [self.song1, self.song2])
         self.assertEqual((bars, earlier, seed), (8, 4, 42))
+        self.assertEqual(visibility, "public")
+
+    def test_private_visibility_and_reject_untrusted_modes(self):
+        job = dict(self.good, visibility="private")
+        self.assertEqual(worker.validate_job(job)[-1], "private")
+        for value in ("something-else", "../private", 1, None, True):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    worker.validate_job(dict(self.good, visibility=value))
 
     def test_traversal_and_unapproved_media_rejected(self):
         for bad in ["../2026/11/first.mp3", "/etc/passwd", "other.mp3",
