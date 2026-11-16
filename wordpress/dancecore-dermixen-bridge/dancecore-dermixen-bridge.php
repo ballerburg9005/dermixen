@@ -266,6 +266,9 @@ function dcmix_publish_mix($job,array $payload) {
     if (!$mix_id) {
         $created=wp_insert_post([
             'post_type'=>'mix','post_status'=>'draft','post_title'=>$title,
+            // Stable, unique URL per generated job: never recycle the permalink
+            // of a previously trashed mix from the same playlist/day.
+            'post_name'=>sanitize_title('dj-mix-'.$playlist_title.'-'.substr($job_id,0,8)),
             'post_author'=>$user_id,'comment_status'=>'open',
             'post_content'=>$description
         ],true);
@@ -642,6 +645,10 @@ add_action('wp_footer',static function(){
     $nonce=wp_create_nonce('wp_rest');
     ?>
     <style>
+    .dcmix-spinner {display:inline-block;width:13px;height:13px;vertical-align:-2px;flex:none;border:2px solid #d5b9d9;border-top-color:#713b81;border-radius:50%;animation:dcmix-rotate 850ms linear infinite}
+    .dcmix-spinner[hidden]{display:none!important}
+    @keyframes dcmix-rotate {to{transform:rotate(360deg)}}
+    @media(prefers-reduced-motion:reduce){.dcmix-spinner{animation:none}}
     #dcmix-live-status[hidden]{display:none!important}
     #dcmix-live-status{position:absolute;z-index:9004;width:min(270px,calc(100vw - 20px));
       box-sizing:border-box;padding:9px 11px;background:#f8f3f9;
