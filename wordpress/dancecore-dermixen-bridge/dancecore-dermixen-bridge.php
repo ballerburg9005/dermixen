@@ -606,6 +606,88 @@ add_action('admin_menu',static function(){
     });
 });
 
+
+/** One accessible consent dialog shared by the directory and the tool page. */
+add_action('wp_footer',static function(){
+    if (!is_user_logged_in() || (!is_post_type_archive('mix') && !is_page('mix-generator')))return;
+    ?>
+    <style>
+    #dcmix-rights-modal[hidden]{display:none!important}
+    #dcmix-rights-modal{position:fixed;inset:0;z-index:20000;background:rgba(20,11,24,.65);
+      display:grid;place-items:center;padding:12px}
+    .dcmix-confirm-dialog{background:var(--global-palette9,#fff);color:var(--global-palette3,#292129);
+      border:1px solid #91549c;border-radius:5px;box-shadow:0 8px 35px rgba(0,0,0,.28);
+      width:min(440px,100%);padding:16px;font-size:13px;line-height:1.4}
+    .dcmix-confirm-dialog h2{font-size:17px!important;line-height:1.2!important;margin:0 0 8px!important}
+    .dcmix-confirm-dialog p{margin:0 0 10px}
+    .dcmix-confirm-dialog label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin:8px 0 13px}
+    .dcmix-confirm-dialog input[type="checkbox"]{margin:3px 0 0;flex:none}
+    .dcmix-dialog-actions{display:flex;justify-content:flex-end;gap:8px}
+    .dcmix-dialog-actions button{font:inherit;font-weight:700;font-size:13px;padding:6px 11px;
+      border:1px solid #8b468b;border-radius:3px;cursor:pointer}
+    .dcmix-dialog-cancel{background:transparent;color:inherit}
+    .dcmix-dialog-accept{background:#8b468b;color:white}
+    .dcmix-dialog-accept:disabled{opacity:.5;cursor:not-allowed}
+    </style>
+    <div id="dcmix-rights-modal" hidden>
+      <div class="dcmix-confirm-dialog" role="dialog" aria-modal="true"
+           aria-labelledby="dcmix-rights-title" tabindex="-1">
+        <h2 id="dcmix-rights-title">Generate Mix Set</h2>
+        <p>The Auto-DJ will combine eligible playlist tracks into a downloadable MP3
+           and publish it under your account. Processing may take several minutes.</p>
+        <label><input id="dcmix-rights-check" type="checkbox">
+          <span>I confirm the included recordings are permitted for mixing and
+          redistribution, and I accept responsibility for publishing this mix.</span>
+        </label>
+        <div class="dcmix-dialog-actions">
+          <button type="button" class="dcmix-dialog-cancel">Cancel</button>
+          <button type="button" class="dcmix-dialog-accept" disabled>Generate Mix Set</button>
+        </div>
+      </div>
+    </div>
+    <script>
+    (function(){
+      const backdrop=document.getElementById('dcmix-rights-modal'),
+        dialog=backdrop.querySelector('[role="dialog"]'),
+        check=document.getElementById('dcmix-rights-check'),
+        yes=backdrop.querySelector('.dcmix-dialog-accept'),
+        no=backdrop.querySelector('.dcmix-dialog-cancel');
+      let finish=null,priorFocus=null;
+      function close(ok){
+        if(!finish)return;
+        const resolve=finish;finish=null;
+        backdrop.hidden=true;
+        document.removeEventListener('keydown',keydown,true);
+        if(priorFocus&&priorFocus.isConnected)priorFocus.focus();
+        resolve(ok);
+      }
+      function keydown(event){
+        if(event.key==='Escape'){event.preventDefault();close(false);}
+        if(event.key==='Tab'){
+          const focusables=[check,no,yes].filter(x=>!x.disabled);
+          const current=focusables.indexOf(document.activeElement);
+          if(event.shiftKey && current===0){event.preventDefault();focusables[focusables.length-1].focus();}
+          else if(!event.shiftKey && current===focusables.length-1){event.preventDefault();focusables[0].focus();}
+        }
+      }
+      check.addEventListener('change',()=>{yes.disabled=!check.checked;});
+      no.addEventListener('click',()=>close(false));
+      yes.addEventListener('click',()=>{if(check.checked)close(true);});
+      backdrop.addEventListener('click',e=>{if(e.target===backdrop)close(false);});
+      window.dcmixConfirmRights=function(){
+        if(finish)return Promise.resolve(false);
+        return new Promise(resolve=>{
+          finish=resolve;priorFocus=document.activeElement;
+          check.checked=false;yes.disabled=true;
+          backdrop.hidden=false;document.addEventListener('keydown',keydown,true);
+          dialog.focus();
+        });
+      };
+    })();
+    </script>
+    <?php
+},18);
+
 /**
  * Inject small per-playlist Generate controls into the existing /mixes/
  * directory without modifying any Dancecore Community files or its votes.
