@@ -118,6 +118,21 @@ add_action('rest_api_init',static function(){
       },
       'permission_callback'=>static function(){return current_user_can('manage_options');}
     ]);
+    // Admin-only recovery for an already rendered and published MP3.
+    // The worker's secret stays on the storage host; no token transfer.
+    register_rest_route('dcmix/v1','/worker/reconcile',[
+      'methods'=>'POST',
+      'permission_callback'=>static function(){return current_user_can('manage_options');},
+      'callback'=>static function(WP_REST_Request $request){
+          try {return dcmix_report($request);}
+          catch (Throwable $error) {
+              return new WP_Error('dcmix_reconcile_exception',
+                  get_class($error).': '.$error->getMessage().
+                  ' ('.basename($error->getFile()).':'.$error->getLine().')',
+                  ['status'=>500]);
+          }
+      }
+    ]);
     register_rest_route('dcmix/v1','/worker/claim',[
       'methods'=>'POST','callback'=>'dcmix_claim','permission_callback'=>'dcmix_worker_auth'
     ]);
