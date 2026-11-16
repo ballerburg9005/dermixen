@@ -69,8 +69,11 @@ def cleanup(item: dict) -> bool:
         return True
     if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1:
         raise ValueError("Refusing non-regular / hard-linked output")
+    checksum = hashlib.sha256()
     with target.open("rb") as reader:
-        actual = hashlib.file_digest(reader, "sha256").hexdigest()
+        for block in iter(lambda: reader.read(1024 * 1024), b""):
+            checksum.update(block)
+    actual = checksum.hexdigest()
     if actual != digest:
         raise ValueError("Storage content differs from WordPress deletion receipt")
     target.unlink()
