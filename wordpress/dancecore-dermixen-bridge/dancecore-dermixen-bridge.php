@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.5.1
+ * Version: 0.5.2
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.5.1';
+const DCMIX_BRIDGE_VERSION = '0.5.2';
 
 function dcmix_table(): string {
     global $wpdb;
@@ -385,12 +385,20 @@ function dcmix_publish_mix($job,array $payload) {
     }
     if (!$attachment_id) {
         // The file is already on Syburg, not on WordPress's filesystem.
-        // Suppress local-upload hooks: an image metadata plugin otherwise
-        // calls exif_read_data('') and fatals on a remote-only MP3.
-        $created=wp_insert_attachment([
-            'post_mime_type'=>'audio/mpeg','post_title'=>$title,
-            'post_status'=>'inherit','post_parent'=>$mix_id,'guid'=>$url
-        ],false,$mix_id,true,false);
+        // The installed Creative Commons image plugin hooks add_attachment
+        // and runs EXIF on all file types, including remote-only MP3s.
+        // Match the site's archive importer: suppress ONLY for this insert,
+        // then restore all callbacks even if the insertion throws.
+        $saved_add_hooks=$GLOBALS['wp_filter']['add_attachment']??null;
+        remove_all_actions('add_attachment');
+        try {
+            $created=wp_insert_attachment([
+                'post_mime_type'=>'audio/mpeg','post_title'=>$title,
+                'post_status'=>'inherit','post_parent'=>$mix_id,'guid'=>$url
+            ],false,$mix_id,true,false);
+        } finally {
+            if ($saved_add_hooks) $GLOBALS['wp_filter']['add_attachment']=$saved_add_hooks;
+        }
         if (is_wp_error($created)) return $created;
         $attachment_id=(int)$created;
     }
