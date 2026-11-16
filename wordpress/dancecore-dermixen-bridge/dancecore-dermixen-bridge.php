@@ -516,23 +516,23 @@ function dcmix_list_jobs() {
  * Only generated mixes get expandable source timestamps and DJ settings.
  * The original community single-mix template remains untouched.
  */
-add_filter('the_content',static function($content){
-    if (!is_singular('mix') || !in_the_loop() || !is_main_query())return $content;
-    $post_id=get_the_ID();
-    $job_id=(string)get_post_meta($post_id,'_dcmix_job_id',true);
-    if (!wp_is_uuid($job_id))return $content;
+add_action('wp_footer',static function(){
+    if (!is_singular('mix'))return;
+    $post_id=get_queried_object_id();
+    if (!$post_id || !wp_is_uuid((string)get_post_meta($post_id,'_dcmix_job_id',true)))return;
     $settings=get_post_meta($post_id,'_dcmix_settings',true);
-    if (!is_array($settings))return $content;
-    $sources=array_values(array_map('intval',$settings['source_track_ids']??[]));
+    if (!is_array($settings))$settings=maybe_unserialize($settings);
+    if (!is_array($settings))return;
+    $ids=array_values(array_map('intval',$settings['source_track_ids']??[]));
     $transitions=is_array($settings['transitions']??null)?$settings['transitions']:[];
     $list_id=absint(get_post_meta($post_id,'_dcx_source_playlist',true));
-    $playlist_link=$list_id?add_query_arg('dc_list',$list_id,home_url('/playlists/')):'';
+    $url=$list_id?add_query_arg('dc_list',$list_id,home_url('/playlists/')):'';
     $html='<details class="dcmix-timeline"><summary>Track timestamps &amp; Auto-DJ settings</summary>';
     $html.='<div class="dcmix-timeline-body"><p>Crossfade: '.absint($settings['bars']??8).
-      ' bars · transitions '.absint($settings['advance_bars']??4).' bars earlier.';
-    if ($playlist_link)$html.=' Source: <a href="'.esc_url($playlist_link).'">original playlist</a>.';
+      ' bars · starts '.absint($settings['advance_bars']??4).' bars earlier.';
+    if ($url)$html.=' Source: <a href="'.esc_url($url).'">original playlist</a>.';
     $html.='</p><ol>';
-    foreach($sources as $index=>$track_id){
+    foreach($ids as $index=>$track_id){
         $position=$index===0?0.0:(float)($transitions[$index-1]['incoming_start_seconds']??0);
         $seconds=max(0,(int)round($position));
         $stamp=$seconds>=3600
@@ -549,11 +549,48 @@ add_filter('the_content',static function($content){
         $html.='</li>';
     }
     $html.='</ol></div></details>';
-    // Community already displays an unconditional static playlist. Replace
-    // it only on generated mixes to avoid showing the same tracks twice.
-    $content=preg_replace('~<h3>Playlist</h3><pre class="dcx-tracklist">.*?</pre>~s','',$content,1);
-    return $content.$html;
-},45);
+    ?>
+    <template id="dcmix-track-timing-template"><?php echo $html; ?></template>
+    <script>
+    (function(){
+        const template=document.getElementById('dcmix-track-timing-template');
+        if(!template)return;
+        const previous=document.querySelector('.dcx-single-tracklist');
+        const target=previous||document.querySelector('.dcx-single-extra')||
+                     document.querySelector('.dcx-single');
+        if(!target)return;
+        if(previous)previous.replaceWith(template.content.cloneNode(true));
+        else target.append(template.content.cloneNode(true));
+    })();
+    </script>
+    <?php
+},16);
+
+/** One-time synchronization for generated mixes created before the new labels. */
+add_action('init',static function(){
+    if (get_option('dcmix_auto_dj_labels_040'))return;
+    $posts=get_posts(['post_type'=>'mix','post_status'=>'publish','posts_per_page'=>100,
+      'fields'=>'ids','no_found_rows'=>true,'suppress_filters'=>true,
+      'meta_key'=>'_dcmix_job_id','meta_compare'=>'EXISTS']);
+    foreach($posts as $post_id){
+        if (!wp_is_uuid((string)get_post_meta($post_id,'_dcmix_job_id',true)))continue;
+        $title=get_the_title($post_id);
+        if (!str_starts_with($title,'Auto-DJ Mix')){
+            $list_id=absint(get_post_meta($post_id,'_dcx_source_playlist',true));
+            global $wpdb;
+            $name=$list_id?(string)$wpdb->get_var($wpdb->prepare(
+                "SELECT title FROM {$wpdb->prefix}dc_lists WHERE id=%d",$list_id)):'Playlist';
+            $title='Auto-DJ Mix — '.$name.' · '.get_post_time('Y-m-d',true,$post_id);
+            wp_update_post(['ID'=>$post_id,'post_title'=>$title]);
+        }
+        $description='Generated and published by the user via the auto-mix tool.';
+        update_post_meta($post_id,'title',$title);
+        update_post_meta($post_id,'info',$description);
+        if (get_post_field('post_content',$post_id)!==$description)
+            wp_update_post(['ID'=>$post_id,'post_content'=>$description]);
+    }
+    update_option('dcmix_auto_dj_labels_040','1',false);
+},99);
 
 add_action('wp_head',static function(){
     if (!is_singular('mix'))return;
