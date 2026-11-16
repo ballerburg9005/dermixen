@@ -512,6 +512,65 @@ function dcmix_list_jobs() {
     return ['jobs'=>$rows];
 }
 
+/**
+ * Only generated mixes get expandable source timestamps and DJ settings.
+ * The original community single-mix template remains untouched.
+ */
+add_filter('the_content',static function($content){
+    if (!is_singular('mix') || !in_the_loop() || !is_main_query())return $content;
+    $post_id=get_the_ID();
+    $job_id=(string)get_post_meta($post_id,'_dcmix_job_id',true);
+    if (!wp_is_uuid($job_id))return $content;
+    $settings=get_post_meta($post_id,'_dcmix_settings',true);
+    if (!is_array($settings))return $content;
+    $sources=array_values(array_map('intval',$settings['source_track_ids']??[]));
+    $transitions=is_array($settings['transitions']??null)?$settings['transitions']:[];
+    $list_id=absint(get_post_meta($post_id,'_dcx_source_playlist',true));
+    $playlist_link=$list_id?add_query_arg('dc_list',$list_id,home_url('/playlists/')):'';
+    $html='<details class="dcmix-timeline"><summary>Track timestamps &amp; Auto-DJ settings</summary>';
+    $html.='<div class="dcmix-timeline-body"><p>Crossfade: '.absint($settings['bars']??8).
+      ' bars · transitions '.absint($settings['advance_bars']??4).' bars earlier.';
+    if ($playlist_link)$html.=' Source: <a href="'.esc_url($playlist_link).'">original playlist</a>.';
+    $html.='</p><ol>';
+    foreach($sources as $index=>$track_id){
+        $position=$index===0?0.0:(float)($transitions[$index-1]['incoming_start_seconds']??0);
+        $seconds=max(0,(int)round($position));
+        $stamp=$seconds>=3600
+          ?sprintf('%d:%02d:%02d',intdiv($seconds,3600),intdiv($seconds%3600,60),$seconds%60)
+          :sprintf('%d:%02d',intdiv($seconds,60),$seconds%60);
+        $name=$track_id?get_the_title($track_id):'';
+        if (!$name)$name='Track '.($index+1).' (removed)';
+        $artist=trim((string)get_post_meta($track_id,'artist',true));
+        $html.='<li><time>'.esc_html($stamp).'</time> ';
+        if ($track_id && get_post_status($track_id)==='publish')
+            $html.='<a href="'.esc_url(get_permalink($track_id)).'">'.
+                  esc_html(($artist!==''?$artist.' — ':'').$name).'</a>';
+        else $html.=esc_html(($artist!==''?$artist.' — ':'').$name);
+        $html.='</li>';
+    }
+    $html.='</ol></div></details>';
+    // Community already displays an unconditional static playlist. Replace
+    // it only on generated mixes to avoid showing the same tracks twice.
+    $content=preg_replace('~<h3>Playlist</h3><pre class="dcx-tracklist">.*?</pre>~s','',$content,1);
+    return $content.$html;
+},45);
+
+add_action('wp_head',static function(){
+    if (!is_singular('mix'))return;
+    ?>
+    <style>
+    .dcmix-timeline{margin:9px 0 16px;border:1px solid #8b468b55;border-radius:3px;
+      background:rgba(139,70,139,.035);padding:7px 10px;font-size:13px}
+    .dcmix-timeline summary{cursor:pointer;font-weight:700}
+    .dcmix-timeline-body{padding:5px 3px 2px}
+    .dcmix-timeline-body p{margin:3px 0 7px}
+    .dcmix-timeline ol{margin:3px 0 0;padding-left:20px}
+    .dcmix-timeline li{margin:3px 0}
+    .dcmix-timeline time{display:inline-block;min-width:3.5em;font-variant-numeric:tabular-nums}
+    </style>
+    <?php
+});
+
 add_shortcode('dcmix_generator',static function(){
     if (!is_user_logged_in()) return '<p>Log in to create a DJ mix.</p>';
     global $wpdb;
