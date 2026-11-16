@@ -1,0 +1,12 @@
+[Unit]
+Description=Clean deleted WordPress-generated mixes from Syburg each minute
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=60s
+AccuracySec=10s
+Persistent=true
+Unit=dcmix-cleanup.service
+
+[Install]
+WantedBy=timers.target
