@@ -117,8 +117,9 @@ and drop selection still require work. It runs separately from WordPress.
 
 ## Standalone Docker worker for Dancecore.party
 
-Build the headless container on your PC and push to Docker Hub. The storage
-server pulls and runs it separately from the WordPress webserver.
+The user builds the headless Docker image on their workstation and pushes
+three architectures: AMD64, ARM64 (used by Syburg), and ARMv7/armhf.
+The storage server pulls the ready-made image, not the Rust source:
 
 ```sh
 cd ~/dermixen
@@ -126,52 +127,57 @@ git pull
 docker buildx build --platform linux/arm64,linux/amd64,linux/arm/v7 --push -t ballerburg9005/dermixen:latest .
 ```
 
-Docker names armhf as `linux/arm/v7`. The actual Syburg storage VM is
-`linux/arm64`; if upstream Rust/C dependencies don't build on 32-bit ARM,
-build the needed architectures with `--platform linux/arm64,linux/amd64`.
+The image includes Dermixen's Rust DJ engine and FFmpeg. It runs as an
+unprivileged standalone queue worker; WordPress does not render audio.
+Container mounts are read-only `/media`, scratch `/work` and output
+`/output`. Rendered MP3s are atomically published to Syburg and served
+at `/dc-media/generated-mixes/<job-uuid>.mp3`.
 
-Test without any WordPress credentials:
-
-```sh
-docker run --rm --platform linux/amd64 ballerburg9005/dermixen:latest health
-docker run --rm -v "$HOME/Music/my-tracks:/media:ro" -v "$HOME:/work" \
-  ballerburg9005/dermixen:latest local /media -o /work/docker-test.mp3 --bars 12
-```
-
-A separate WordPress bridge lives in
+A separate WordPress plugin is in
 `wordpress/dancecore-dermixen-bridge/dancecore-dermixen-bridge.php`.
-It requires activation only when the container is ready, and does not
-modify the Dancecore Community plugin, voting system or Kadence theme.
-Only authorized on-site CC0 audio can enter the queue; external music
-links are excluded.
+It does not modify the existing Dancecore Community plugin, voting
+system or Kadence theme.
 
-The worker uses authenticated outbound HTTPS calls to:
-- `POST /wp-json/dcmix/v1/worker/claim` — claim a queued member request;
-- `POST /wp-json/dcmix/v1/worker/report` — report the completed MP3;
-- members use `GET/POST /wp-json/dcmix/v1/jobs` for their own jobs.
+**User workflow:** On the existing **Mixes & Playlists** archive,
+a logged-in member presses **Generate mix** beside a public playlist.
+The bridge selects eligible local CC0 recordings, respecting source
+order; ineligible external or unlicensed tracks are skipped.
+The job is queued asynchronously, the storage worker mixes the sources,
+and WordPress publishes a finished `mix` post attributed to the
+**member who pressed Generate**, not the original playlist curator.
+The result has a playable native MP3, download link, automatic-mixing
+disclosure, source tracklist and playlist provenance. It appears in
+Finished mixes and on the generating member's profile.
 
-The audio input is read-only `/media`, scratch space is `/work`,
-and completed MP3s are atomically installed in `/output`, served by
-the existing media proxy under `/dc-media/generated-mixes/`.
-The container does not expose any listening port. It neither processes
-audio in PHP nor automatically publishes generated mixes as site posts.
+Worker API:
+- `POST /wp-json/dcmix/v1/worker/claim` — authenticated job claim
+- `POST /wp-json/dcmix/v1/worker/report` — result/failure receipt
+- `GET/POST /wp-json/dcmix/v1/jobs` — members view/submit their jobs
+- `POST /wp-json/dcmix/v1/worker/configure` — admin-only SHA256 pairing
+- `POST /wp-json/dcmix/v1/worker/reconcile` — admin-only recovery
 
-The storage server already has an offline Compose template under
-`/root/dancecore-dermixen-runtime/compose.yml`. After the user pushes
-the image, activate the bridge and provision a private mode-0600
-`/root/dancecore-dermixen-runtime/worker.env` file with
-`DCMIX_WORKER_TOKEN=<token-from-WP-admin-settings>`, then launch:
+**Secrets:** A randomly generated bearer secret stays on Syburg in a
+mode-0600 `worker.env`. WordPress stores only its SHA-256 verifier.
+Do not paste or commit a shared token. The worker uses outbound HTTPS;
+no inbound Docker port is required.
+
+Current Syburg runtime:
+`/root/dancecore-dermixen-runtime/compose.yml`. Operator commands:
 
 ```sh
 cd /root/dancecore-dermixen-runtime
+docker compose --profile manual ps
+docker compose --profile manual logs -f dermixen
 docker compose --profile manual pull dermixen
 docker compose --profile manual up -d dermixen
-docker compose logs -f dermixen
 ```
 
-Docker CI covers the amd64 image and worker-protocol tests. ARM64/ARMv7
-cross-platform builds and the final WordPress-to-storage end-to-end job
-still need verification before enabling a production workflow.
+The ARM64 container completed a real two-track render and the WordPress
+bridge published the corresponding member-authored Mix post on
+2026-11-16. The Docker amd64 build, protocol tests, and PHP lint also
+passed. Follow-up work includes browser testing of the logged-in
+Generate button, worker crash/stale-job recovery, and audio-quality
+tuning for musical transitions.
 
 ## Make a mix
 
