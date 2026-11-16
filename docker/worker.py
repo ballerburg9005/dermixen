@@ -24,6 +24,7 @@ from urllib.request import Request, urlopen
 MEDIA = Path(os.getenv("DCMIX_MEDIA_DIR", "/media")).resolve()
 WORK = Path(os.getenv("DCMIX_WORK_DIR", "/work")).resolve()
 OUTPUT = Path(os.getenv("DCMIX_OUTPUT_DIR", "/output")).resolve()
+PRIVATE_OUTPUT = Path(os.getenv("DCMIX_PRIVATE_OUTPUT_DIR", "/private-output")).resolve()
 API = os.getenv("DCMIX_API", "https://dancecore.party/wp-json/dcmix/v1").rstrip("/")
 POLL = max(5, min(300, int(os.getenv("DCMIX_POLL_SECONDS", "30"))))
 TOKEN = os.getenv("DCMIX_WORKER_TOKEN", "")
@@ -78,7 +79,7 @@ def source_path(relative: str) -> Path:
     return source
 
 
-def validate_job(job: dict) -> tuple[str, list[Path], int, int, int]:
+def validate_job(job: dict) -> tuple[str, list[Path], int, int, int, str]:
     if not isinstance(job, dict):
         raise ValueError("Job must be an object")
     job_id = job.get("id")
@@ -113,11 +114,14 @@ def validate_job(job: dict) -> tuple[str, list[Path], int, int, int]:
                                     ("seed", seed, 0, 2**31-1)):
         if type(value) is not int or not low <= value <= high:
             raise ValueError(f"{name} must be an integer from {low} to {high}")
-    return job_id, paths, bars, advance, seed
+    visibility = job.get("visibility", "public")
+    if visibility not in ("public", "private") or not isinstance(visibility, str):
+        raise ValueError("Invalid output visibility")
+    return job_id, paths, bars, advance, seed, visibility
 
 
 def execute_job(job: dict) -> dict:
-    job_id, paths, bars, advance, seed = validate_job(job)
+    job_id, paths, bars, advance, seed, visibility = validate_job(job)
     jobdir = WORK / "jobs" / job_id
     jobdir.mkdir(parents=True, exist_ok=False)
     try:
@@ -150,11 +154,12 @@ def execute_job(job: dict) -> dict:
         digest = hashlib.file_digest(result_mp3.open("rb"), "sha256").hexdigest()
         playlist = json.loads(result_mp3.with_suffix(".tracklist.json").read_text())
         transitions = playlist.get("transitions", [])
-        # The media origin already serves /dc-media/ from /srv/dancecore/media.
-        # Use an atomic rename *on the destination filesystem* for publishing.
-        OUTPUT.mkdir(parents=True, exist_ok=True)
-        destination = OUTPUT / (job_id + ".mp3")
-        staging = OUTPUT / ("." + job_id + ".upload")
+        # Private and public outputs go to disjoint bind mounts. Never stage
+        # private audio in the public origin's media directory, even briefly.
+        root = PRIVATE_OUTPUT if visibility == "private" else OUTPUT
+        root.mkdir(parents=True, exist_ok=True)
+        destination = root / (job_id + ".mp3")
+        staging = root / ("." + job_id + ".upload")
         if destination.exists():
             raise RuntimeError("An output with this identifier already exists")
         try:
@@ -163,11 +168,13 @@ def execute_job(job: dict) -> dict:
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(staging, destination)
+            if visibility == "private":
+                destination.chmod(0o640)
         finally:
             staging.unlink(missing_ok=True)
         print(f"published {destination.name}: {destination.stat().st_size} bytes", flush=True)
         return {"id": job_id, "status": "completed",
-                "output_path": "generated-mixes/" + destination.name,
+                "output_path": ("private-mixes/" if visibility == "private" else "generated-mixes/") + destination.name,
                 "sha256": digest, "bytes": destination.stat().st_size,
                 "transitions": transitions}
     finally:
