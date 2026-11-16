@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 ROOT = Path(os.environ.get("DCMIX_OUTPUT_ROOT", "/srv/dancecore/media/generated-mixes"))
+PRIVATE_ROOT = Path("/srv/dancecore/private-mixes")
 ENV_FILE = Path(os.environ.get("DCMIX_WORKER_ENV", "/root/dancecore-dermixen-runtime/worker.env"))
 BASE = "https://dancecore.party/wp-json/dcmix/v1/"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
@@ -50,16 +51,20 @@ def api(token: str, endpoint: str, body: dict) -> dict:
 
 
 def cleanup(item: dict) -> bool:
-    if not isinstance(item, dict) or set(item) != {"id", "sha256"}:
+    if not isinstance(item, dict) or set(item) not in ({"id", "sha256"}, {"id", "sha256", "storage"}):
         raise ValueError("Unexpected tombstone format")
+    storage = item.get("storage", "public")
+    if storage not in ("public", "private"):
+        raise ValueError("Invalid tombstone storage")
     identifier, digest = item["id"], item["sha256"]
     if not isinstance(identifier, str) or not UUID.fullmatch(identifier):
         raise ValueError("Unapproved output UUID")
     if not isinstance(digest, str) or not SHA.fullmatch(digest):
         raise ValueError("Missing SHA-256")
     # The name must be exactly a UUID + .mp3 in this dedicated directory.
-    folder = ROOT.resolve(strict=True)
-    target = ROOT / (identifier + ".mp3")
+    root = PRIVATE_ROOT if storage == "private" else ROOT
+    folder = root.resolve(strict=True)
+    target = root / (identifier + ".mp3")
     if target.parent.resolve(strict=True) != folder:
         raise ValueError("Output escaped storage mount")
     try:
