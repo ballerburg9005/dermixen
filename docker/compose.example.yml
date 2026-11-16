@@ -23,5 +23,6 @@ services:
       - /srv/dancecore/media:/media:ro
       - /srv/dancecore/mixsets/work:/work:rw
       - /srv/dancecore/media/generated-mixes:/output:rw
+      - /srv/dancecore/private-mixes:/private-output:rw
     tmpfs:
       - /tmp:rw,nosuid,size=512m,uid=10001,gid=10001
