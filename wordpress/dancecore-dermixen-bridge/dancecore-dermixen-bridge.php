@@ -275,10 +275,22 @@ function dcmix_publish_mix($job,array $payload) {
     $output=(string)$payload['output_path'];
     $url=home_url('/dc-media/'.$output);
     if (!$attachment_id) {
+        // An interrupted earlier attempt can leave a parented attachment.
+        // Reuse it rather than creating duplicate orphan entries.
+        $existing_attachments=get_children([
+          'post_parent'=>$mix_id,'post_type'=>'attachment',
+          'numberposts'=>1,'post_status'=>'inherit','fields'=>'ids'
+        ]);
+        if ($existing_attachments) $attachment_id=(int)array_key_first($existing_attachments);
+    }
+    if (!$attachment_id) {
+        // The file is already on Syburg, not on WordPress's filesystem.
+        // Suppress local-upload hooks: an image metadata plugin otherwise
+        // calls exif_read_data('') and fatals on a remote-only MP3.
         $created=wp_insert_attachment([
             'post_mime_type'=>'audio/mpeg','post_title'=>$title,
             'post_status'=>'inherit','post_parent'=>$mix_id,'guid'=>$url
-        ],false,$mix_id,true);
+        ],false,$mix_id,true,false);
         if (is_wp_error($created)) return $created;
         $attachment_id=(int)$created;
     }
