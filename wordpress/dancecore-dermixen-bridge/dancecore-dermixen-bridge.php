@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.2.0
+ * Version: 0.3.0
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.2.0';
+const DCMIX_BRIDGE_VERSION = '0.3.0';
 
 function dcmix_table(): string {
     global $wpdb;
@@ -138,6 +138,21 @@ add_action('rest_api_init',static function(){
     ]);
     register_rest_route('dcmix/v1','/worker/report',[
       'methods'=>'POST','callback'=>'dcmix_report','permission_callback'=>'dcmix_worker_auth'
+    ]);
+    register_rest_route('dcmix/v1','/worker/cleanup/list',[
+      'methods'=>'POST','callback'=>'dcmix_cleanup_list','permission_callback'=>'dcmix_worker_auth'
+    ]);
+    register_rest_route('dcmix/v1','/worker/cleanup/ack',[
+      'methods'=>'POST','callback'=>'dcmix_cleanup_ack','permission_callback'=>'dcmix_worker_auth'
+    ]);
+    register_rest_route('dcmix/v1','/worker/cleanup/queue',[
+      'methods'=>'POST','callback'=>static function(WP_REST_Request $request){
+         $post_id=absint($request->get_param('post_id'));
+         if (!$post_id || get_post_status($post_id)!=='trash')
+             return new WP_Error('dcmix_cleanup','Only a trashed generated mix can be queued',['status'=>422]);
+         return ['queued'=>dcmix_mark_removed_mix($post_id)];
+      },
+      'permission_callback'=>static function(){return current_user_can('manage_options');}
     ]);
     register_rest_route('dcmix/v1','/jobs',[
       ['methods'=>'GET','callback'=>'dcmix_list_jobs','permission_callback'=>'dcmix_user_auth'],
@@ -359,6 +374,100 @@ function dcmix_report(WP_REST_Request $request) {
       'download'=>$payload['url']??null,'mix_url'=>$payload['post_url']??null];
 }
 
+/**
+ * A removed generated mix must also remove its UUID-named Syburg MP3.
+ * No other CPTs, upload paths, or ordinary audio attachments are touched.
+ * Deletion is asynchronous: Syburg fetches only previously authenticated
+ * tombstones, verifies the stored SHA-256, unlinks the file, then ACKs.
+ */
+function dcmix_mark_removed_mix($post_id) {
+    global $wpdb;
+    $post_id=(int)$post_id;
+    if (get_post_type($post_id)!=='mix') return false;
+    $id=(string)get_post_meta($post_id,'_dcmix_job_id',true);
+    if (!wp_is_uuid($id)) return false;
+    $table=dcmix_table();
+    $row=$wpdb->get_row($wpdb->prepare(
+        "SELECT status,result_json FROM $table WHERE id=%s",$id));
+    if (!$row || !in_array($row->status,['completed','delete_pending'],true))return false;
+    $result=json_decode((string)$row->result_json,true);
+    if (!is_array($result) || (int)($result['post_id']??0)!==$post_id
+      || (string)($result['output_path']??'')!=='generated-mixes/'.$id.'.mp3'
+      || !preg_match('/^[a-f0-9]{64}$/',(string)($result['sha256']??'')))return false;
+    if ($row->status==='delete_pending')return true;
+    return $wpdb->update($table,['status'=>'delete_pending'],
+       ['id'=>$id,'status'=>'completed'],['%s'],['%s','%s'])===1;
+}
+add_action('trashed_post','dcmix_mark_removed_mix',10,1);
+add_action('before_delete_post','dcmix_mark_removed_mix',10,1);
+
+/** Verify again that the mix is actually deleted/trashed before offering a purge. */
+function dcmix_cleanup_list() {
+    global $wpdb;
+    $table=dcmix_table();
+    $rows=$wpdb->get_results(
+        "SELECT id,result_json FROM $table WHERE status='delete_pending' ORDER BY finished_at ASC LIMIT 15");
+    $items=[];
+    foreach($rows as $row) {
+        $id=(string)$row->id;
+        if (!wp_is_uuid($id))continue;
+        $result=json_decode((string)$row->result_json,true);
+        if (!is_array($result)
+           || (string)($result['output_path']??'')!=='generated-mixes/'.$id.'.mp3'
+           || !preg_match('/^[a-f0-9]{64}$/',(string)($result['sha256']??'')))continue;
+        $post_id=absint($result['post_id']??0);
+        $status=$post_id?get_post_status($post_id):false;
+        if ($status!==false && $status!=='trash')continue;
+        $items[]=['id'=>$id,'sha256'=>(string)$result['sha256']];
+    }
+    return ['items'=>$items];
+}
+function dcmix_cleanup_ack(WP_REST_Request $request) {
+    global $wpdb;
+    $id=(string)$request->get_param('id');
+    if (!wp_is_uuid($id))return new WP_Error('dcmix_cleanup','Invalid ID',['status'=>400]);
+    $table=dcmix_table();
+    $row=$wpdb->get_row($wpdb->prepare(
+      "SELECT status,result_json FROM $table WHERE id=%s",$id));
+    if (!$row)return new WP_Error('dcmix_cleanup','Unknown job',['status'=>404]);
+    if ($row->status==='deleted')return ['ok'=>true,'status'=>'deleted'];
+    if ($row->status!=='delete_pending')
+        return new WP_Error('dcmix_cleanup','Job not marked for deletion',['status'=>409]);
+    $payload=json_decode((string)$row->result_json,true);
+    $post_id=absint($payload['post_id']??0);
+    $post_status=$post_id?get_post_status($post_id):false;
+    if ($post_status!==false && $post_status!=='trash')
+        return new WP_Error('dcmix_cleanup','Mix has been restored',['status'=>409]);
+    $updated=$wpdb->update($table,['status'=>'deleted'],
+        ['id'=>$id,'status'=>'delete_pending'],['%s'],['%s','%s']);
+    if ($updated!==1)return new WP_Error('dcmix_cleanup','Concurrent update',['status'=>409]);
+    $aid=$post_id?absint(get_post_meta($post_id,'file',true)):0;
+    if ($aid && (string)get_post_meta($aid,'_dcmix_job_id',true)===$id) {
+        // The public MP3 was already removed. Discard only its generated
+        // attachment, not the source tracks or other uploaded media.
+        wp_delete_attachment($aid,true);
+        delete_post_meta($post_id,'file');
+    }
+    return ['ok'=>true,'status'=>'deleted'];
+}
+
+/** Restored trashed jobs must not become dead links. */
+add_action('untrashed_post',static function($post_id){
+    global $wpdb;
+    if (get_post_type($post_id)!=='mix')return;
+    $id=(string)get_post_meta($post_id,'_dcmix_job_id',true);
+    if (!wp_is_uuid($id))return;
+    $table=dcmix_table();
+    $status=$wpdb->get_var($wpdb->prepare("SELECT status FROM $table WHERE id=%s",$id));
+    if ($status==='delete_pending') {
+        $wpdb->update($table,['status'=>'completed'],['id'=>$id,'status'=>'delete_pending'],
+                       ['%s'],['%s','%s']);
+    } elseif ($status==='deleted') {
+        // The file is genuinely gone. Hold as draft until regenerated.
+        wp_update_post(['ID'=>$post_id,'post_status'=>'draft']);
+    }
+},10,1);
+
 function dcmix_list_jobs() {
     global $wpdb;
     $table=dcmix_table();
@@ -370,6 +479,13 @@ function dcmix_list_jobs() {
     foreach($rows as &$row) {
         $row['result']=$row['result_json']?json_decode($row['result_json'],true):null;
         unset($row['result_json']);
+        if ($row['result'] && isset($row['result']['post_id'])) {
+            $post_status=get_post_status((int)$row['result']['post_id']);
+            if ($row['status']!=='completed' || $post_status!=='publish') {
+                unset($row['result']['post_url'],$row['result']['url']);
+                if ($row['status']==='completed')$row['status']='deleted';
+            }
+        }
     }
     return ['jobs'=>$rows];
 }
