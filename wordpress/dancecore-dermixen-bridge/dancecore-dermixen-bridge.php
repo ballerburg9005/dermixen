@@ -541,6 +541,9 @@ add_action('wp_footer',static function(){
     .dcmix-quick button {font:inherit;font-size:12px;padding:3px 8px;border:1px solid #b9a4bf;background:#f6f2f7;color:#53365a;border-radius:3px;cursor:pointer}
     .dcmix-quick button:disabled {opacity:.65;cursor:default}
     .dcmix-quick .dcmix-feedback {font-size:12px;color:#795580}
+    .dcmix-spinner {display:inline-block;width:13px;height:13px;vertical-align:-2px;flex:none;border:2px solid #d5b9d9;border-top-color:#713b81;border-radius:50%;animation:dcmix-rotate 850ms linear infinite}
+    @keyframes dcmix-rotate {to{transform:rotate(360deg)}}
+    @media(prefers-reduced-motion:reduce){.dcmix-spinner{animation:none;border-top-color:#713b81}}
     </style>
     <script>
     (function(){
@@ -580,6 +583,7 @@ add_action('wp_footer',static function(){
           try{
             const r=await call('POST',{playlist_id:id,bars:8,advance_bars:4});
             feedback.textContent='Queued '+r.included+' tracks'+(r.omitted.length?' · '+r.omitted.length+' skipped':'');
+            window.dispatchEvent(new CustomEvent('dcmix-job-queued',{detail:{id:r.id}}));
             refresh();
           }catch(e){
             feedback.textContent=e.message;
@@ -590,12 +594,21 @@ add_action('wp_footer',static function(){
       async function refresh(){
         try{
           const data=await call('GET');
+          const seen=new Set();
           for(const job of data.jobs||[]){
-            const entry=buttons.get(Number(job.source_list_id));
+            const listId=Number(job.source_list_id);
+            if(seen.has(listId))continue; // Never let an older job replace a newer active one.
+            seen.add(listId);
+            const entry=buttons.get(listId);
             if(!entry)continue;
             if(['queued','running'].includes(job.status)){
               entry.button.disabled=true;
-              entry.feedback.textContent=job.status==='queued'?'Queued':'Generating…';
+              entry.feedback.replaceChildren();
+              const spin=document.createElement('span');
+              spin.className='dcmix-spinner';
+              spin.setAttribute('aria-hidden','true');
+              entry.feedback.append(spin,
+                  document.createTextNode(job.status==='queued'?' Queued':' Generating…'));
             }else if(job.status==='completed'&&job.result&&job.result.post_url){
               entry.button.disabled=false;
               entry.feedback.replaceChildren();
@@ -606,6 +619,9 @@ add_action('wp_footer',static function(){
             }else if(job.status==='failed'){
               entry.button.disabled=false;
               entry.feedback.textContent='Previous generation failed';
+            }else{
+              entry.button.disabled=false;
+              entry.feedback.textContent='';
             }
           }
         }catch(e){/* keep playlist links and buttons usable */}
@@ -616,3 +632,121 @@ add_action('wp_footer',static function(){
     </script>
     <?php
 },20);
+
+// This compact job indicator is visible on ANY logged-in page during a render,
+// anchored below the existing help bubble where one is visible. The normal
+// mix/player/archive DOM remains owned by the community and voting plugins.
+add_action('wp_footer',static function(){
+    if (!is_user_logged_in() || is_admin())return;
+    $endpoint=rest_url('dcmix/v1/jobs');
+    $nonce=wp_create_nonce('wp_rest');
+    ?>
+    <style>
+    #dcmix-live-status[hidden]{display:none!important}
+    #dcmix-live-status{position:absolute;z-index:9004;width:min(270px,calc(100vw - 20px));
+      box-sizing:border-box;padding:9px 11px;background:#f8f3f9;
+      border:1px solid #b995bd;border-radius:5px;box-shadow:0 3px 12px rgba(35,15,40,.18);
+      color:#38263c;font-size:12px;line-height:1.35}
+    #dcmix-live-status strong{font-size:13px}
+    #dcmix-live-status .dcmix-status-line{display:flex;align-items:center;gap:8px}
+    #dcmix-live-status .dcmix-status-detail{margin:4px 0 0 22px}
+    #dcmix-live-status a{color:#713b81;font-weight:700;text-decoration:underline}
+    #dcmix-live-status button{float:right;margin:-3px -4px 0 4px;border:0;background:transparent;
+      color:#715d74;cursor:pointer;font-size:17px;line-height:1}
+    </style>
+    <script>
+    (function(){
+      const endpoint=<?php echo wp_json_encode($endpoint); ?>;
+      const nonce=<?php echo wp_json_encode($nonce); ?>;
+      const panel=document.createElement('aside');
+      panel.id='dcmix-live-status';
+      panel.setAttribute('role','status');
+      panel.setAttribute('aria-live','polite');
+      panel.setAttribute('aria-label','DJ mix generation');
+      panel.hidden=true;
+      panel.innerHTML='<button type="button" title="Dismiss" aria-label="Dismiss mix status">×</button>'+
+        '<div class="dcmix-status-line"><span class="dcmix-spinner" aria-hidden="true"></span>'+
+        '<strong>Generating mix</strong></div><div class="dcmix-status-detail"></div>';
+      document.body.append(panel);
+      const heading=panel.querySelector('strong');
+      const ring=panel.querySelector('.dcmix-spinner');
+      const details=panel.querySelector('.dcmix-status-detail');
+      let lastJob='',dismissed='',requesting=false;
+
+      function place(){
+        const guide=document.querySelector('#dcx-community-guide');
+        const rect=guide&&!guide.hidden?guide.getBoundingClientRect():null;
+        if(rect&&rect.height>0){
+          panel.style.left=Math.max(8,rect.left+window.scrollX)+'px';
+          panel.style.top=Math.max(5,rect.bottom+window.scrollY+9)+'px';
+          panel.style.right='auto';
+        }else{
+          panel.style.left='auto';
+          panel.style.right='12px';
+          const shell=document.querySelector('.dcx-list-region');
+          const anchor=shell?shell.getBoundingClientRect().top+window.scrollY:135;
+          panel.style.top=Math.max(120,anchor)+'px';
+        }
+      }
+      function show(job){
+        const active=['queued','running'].includes(job.status);
+        const finished=job.status==='completed'&&job.result&&job.result.post_url;
+        const failed=job.status==='failed';
+        if(!active&&!finished&&!failed){panel.hidden=true;return;}
+        if(dismissed===job.id && !active){panel.hidden=true;return;}
+        lastJob=job.id;
+        panel.hidden=false;
+        ring.hidden=!active;
+        heading.textContent=active?'Generating DJ mix':finished?'Mix ready':'Mix generation failed';
+        details.replaceChildren();
+        if(active){
+          details.textContent=job.status==='queued'?'Waiting in queue…':'Mixing audio on storage server…';
+        }else if(finished){
+          const link=document.createElement('a');
+          link.href=job.result.post_url;
+          link.textContent='Open generated mix';
+          details.append(link);
+        }else{
+          details.textContent=job.error_message||'Generation could not finish';
+        }
+        place();
+      }
+      async function refresh(){
+        if(requesting)return;
+        requesting=true;
+        try{
+          const r=await fetch(endpoint,{credentials:'same-origin',
+            headers:{'X-WP-Nonce':nonce},cache:'no-store'});
+          if(!r.ok)throw Error('Could not check generation');
+          const data=await r.json();
+          const jobs=Array.isArray(data.jobs)?data.jobs:[];
+          const current=jobs.find(j=>j.status==='queued'||j.status==='running');
+          // Show the newest finished/failed job for four hours, then disappear.
+          const latest=jobs.find(j=>{
+            if(!['completed','failed'].includes(j.status))return false;
+            const when=Date.parse(j.created_at.replace(' ','T')+'Z');
+            return Number.isFinite(when)&&Date.now()-when<4*3600*1000;
+          });
+          if(current)show(current);
+          else if(latest)show(latest);
+          else panel.hidden=true;
+        }catch(error){/* Keep any existing indicator while briefly offline. */}
+        finally{requesting=false;}
+      }
+      panel.querySelector('button').addEventListener('click',()=>{
+        dismissed=lastJob;panel.hidden=true;
+      });
+      window.addEventListener('dcmix-job-queued',function(event){
+        const id=event.detail&&event.detail.id;
+        if(typeof id==='string'){dismissed='';show({id,status:'queued'});}
+        refresh();
+      });
+      window.addEventListener('resize',place);
+      const guide=document.querySelector('#dcx-community-guide');
+      if(guide)new MutationObserver(place).observe(guide,{attributes:true,
+        attributeFilter:['hidden','style','class']});
+      refresh();setInterval(refresh,12000);
+    })();
+    </script>
+    <?php
+},22);
