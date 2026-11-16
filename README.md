@@ -115,6 +115,64 @@ Use `--bars 4` or `--bars 12` to compare fade lengths. The current script
 is not a creative Auto-DJ: phrase-aware planning, vocal separation,
 and drop selection still require work. It runs separately from WordPress.
 
+## Standalone Docker worker for Dancecore.party
+
+Build the headless container on your PC and push to Docker Hub. The storage
+server pulls and runs it separately from the WordPress webserver.
+
+```sh
+cd ~/dermixen
+git pull
+docker buildx build --platform linux/arm64,linux/amd64,linux/arm/v7 --push -t ballerburg9005/dermixen:latest .
+```
+
+Docker names armhf as `linux/arm/v7`. The actual Syburg storage VM is
+`linux/arm64`; if upstream Rust/C dependencies don't build on 32-bit ARM,
+build the needed architectures with `--platform linux/arm64,linux/amd64`.
+
+Test without any WordPress credentials:
+
+```sh
+docker run --rm --platform linux/amd64 ballerburg9005/dermixen:latest health
+docker run --rm -v "$HOME/Music/my-tracks:/media:ro" -v "$HOME:/work" \
+  ballerburg9005/dermixen:latest local /media -o /work/docker-test.mp3 --bars 12
+```
+
+A separate WordPress bridge lives in
+`wordpress/dancecore-dermixen-bridge/dancecore-dermixen-bridge.php`.
+It requires activation only when the container is ready, and does not
+modify the Dancecore Community plugin, voting system or Kadence theme.
+Only authorized on-site CC0 audio can enter the queue; external music
+links are excluded.
+
+The worker uses authenticated outbound HTTPS calls to:
+- `POST /wp-json/dcmix/v1/worker/claim` — claim a queued member request;
+- `POST /wp-json/dcmix/v1/worker/report` — report the completed MP3;
+- members use `GET/POST /wp-json/dcmix/v1/jobs` for their own jobs.
+
+The audio input is read-only `/media`, scratch space is `/work`,
+and completed MP3s are atomically installed in `/output`, served by
+the existing media proxy under `/dc-media/generated-mixes/`.
+The container does not expose any listening port. It neither processes
+audio in PHP nor automatically publishes generated mixes as site posts.
+
+The storage server already has an offline Compose template under
+`/root/dancecore-dermixen-runtime/compose.yml`. After the user pushes
+the image, activate the bridge and provision a private mode-0600
+`/root/dancecore-dermixen-runtime/worker.env` file with
+`DCMIX_WORKER_TOKEN=<token-from-WP-admin-settings>`, then launch:
+
+```sh
+cd /root/dancecore-dermixen-runtime
+docker compose --profile manual pull dermixen
+docker compose --profile manual up -d dermixen
+docker compose logs -f dermixen
+```
+
+Docker CI covers the amd64 image and worker-protocol tests. ARM64/ARMv7
+cross-platform builds and the final WordPress-to-storage end-to-end job
+still need verification before enabling a production workflow.
+
 ## Make a mix
 
 Scan a folder of tracks, put two of them in a mix, and render it. Substitute your own folder and two tracks of your own at a similar tempo.
