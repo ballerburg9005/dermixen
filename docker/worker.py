@@ -98,7 +98,8 @@ def validate_job(job: dict) -> tuple[str, list[Path], int, int, int, str]:
         if declared_sha is not None:
             if not isinstance(declared_sha, str) or not re.fullmatch(r"[a-f0-9]{64}", declared_sha):
                 raise ValueError("Invalid source hash")
-            digest = hashlib.file_digest(source.open("rb"), "sha256").hexdigest()
+            with source.open("rb") as reader:
+                digest = hashlib.file_digest(reader, "sha256").hexdigest()
             if digest != declared_sha:
                 raise ValueError("Source checksum mismatch")
         paths.append(source)
@@ -151,7 +152,8 @@ def execute_job(job: dict) -> dict:
                 raise RuntimeError(f"Dermixen renderer failed with exit {returncode}")
         if not result_mp3.is_file() or result_mp3.stat().st_size < 1024:
             raise RuntimeError("No valid MP3 was produced")
-        digest = hashlib.file_digest(result_mp3.open("rb"), "sha256").hexdigest()
+        with result_mp3.open("rb") as reader:
+            digest = hashlib.file_digest(reader, "sha256").hexdigest()
         playlist = json.loads(result_mp3.with_suffix(".tracklist.json").read_text())
         transitions = playlist.get("transitions", [])
         # Private and public outputs go to disjoint bind mounts. Never stage
