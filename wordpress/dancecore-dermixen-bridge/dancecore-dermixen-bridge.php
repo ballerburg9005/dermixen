@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.4.1
+ * Version: 0.5.0
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.4.1';
+const DCMIX_BRIDGE_VERSION = '0.5.0';
 
 function dcmix_table(): string {
     global $wpdb;
@@ -171,9 +171,12 @@ add_action('rest_api_init',static function(){
 function dcmix_enqueue(WP_REST_Request $request) {
     global $wpdb;
     $user=get_current_user_id();
-    if ($request->get_param('rights_confirmed')!==true)
+    $visibility=(string)($request->get_param('visibility')??'public');
+    if (!in_array($visibility,['public','private'],true))
+        return new WP_Error('dcmix_visibility','Choose public or private',['status'=>422]);
+    if ($visibility==='public' && $request->get_param('rights_confirmed')!==true)
         return new WP_Error('dcmix_rights',
-          'Confirm responsibility for publishing and redistribution rights before generating.',
+          'Confirm responsibility for publishing and redistribution rights before publishing.',
           ['status'=>422]);
     $list_id=absint($request->get_param('playlist_id'));
     if (!$list_id) return new WP_Error('dcmix_list','Choose a playlist',['status'=>400]);
@@ -197,7 +200,8 @@ function dcmix_enqueue(WP_REST_Request $request) {
     $job=['id'=>$id,'tracks'=>$source['tracks'],'bars'=>$bars,
           'advance_bars'=>$advance,'seed'=>42,
           'playlist_signature'=>dcmix_playlist_signature($list_id),
-          'rights_confirmed_at'=>gmdate('c')];
+          'visibility'=>$visibility,
+          'rights_confirmed_at'=>$visibility==='public'?gmdate('c'):null];
     $ok=$wpdb->insert($table,[
       'id'=>$id,'user_id'=>$user,'source_list_id'=>$list_id,
       'status'=>'queued','created_at'=>current_time('mysql',true),
@@ -231,6 +235,68 @@ function dcmix_claim() {
 }
 
 /**
+ * Private files are NOT under the public media root. The ordinary WordPress login
+ * cookie authorizes the first request; a ten-minute signed origin URL permits HTTP
+ * Range requests without sending the raw MP3 through the WordPress PHP worker.
+ * Signed URLs are bearer links and can be shared until expiry; users must keep them
+ * private. No permanent/direct private origin URL is ever saved in post metadata.
+ */
+function dcmix_private_link(string $id,bool $download=false): string {
+    return add_query_arg(['action'=>'dcmix_private_download','job'=>$id]
+       +($download?['download'=>'1']:[]),admin_url('admin-post.php'));
+}
+function dcmix_signed_private_url(string $id,bool $download=false) {
+    if (!wp_is_uuid($id))return false;
+    $verifier=(string)get_option('dcmix_worker_token_hash','');
+    if (!preg_match('/^[a-f0-9]{64}$/D',$verifier))return false;
+    $key=hash('sha256',$verifier.'dcmix-private-url-v1');
+    $path='/dc-media/private-mixes/'.$id.'.mp3';
+    $expiry=time()+600;
+    $sig=rtrim(strtr(base64_encode(md5($expiry.$path.' '.$key,true)),'+/','-_'),'=');
+    return add_query_arg(['expires'=>$expiry,'sig'=>$sig]+($download?['download'=>'1']:[]),
+                         home_url($path));
+}
+function dcmix_private_download() {
+    if (!is_user_logged_in()) {
+        if (!headers_sent())status_header(401);
+        nocache_headers();
+        exit('Please log in to download this private Mix Set.');
+    }
+    $id=(string)($_GET['job']??'');
+    if (!wp_is_uuid($id)) {status_header(404);exit('Not found');}
+    global $wpdb;
+    $table=dcmix_table();
+    $row=$wpdb->get_row($wpdb->prepare(
+      "SELECT user_id,status,request_json,result_json FROM $table WHERE id=%s",$id));
+    if (!$row || (int)$row->user_id!==get_current_user_id() || $row->status!=='completed') {
+        status_header(404);exit('Not found');
+    }
+    $req=json_decode((string)$row->request_json,true);
+    $result=json_decode((string)$row->result_json,true);
+    if (($req['visibility']??'public')!=='private'
+        || ($result['output_path']??'')!=='private-mixes/'.$id.'.mp3'
+        || !preg_match('/^[a-f0-9]{64}$/',(string)($result['sha256']??''))) {
+        status_header(404);exit('Not found');
+    }
+    $post_id=absint($result['post_id']??0);
+    if (!$post_id || get_post_type($post_id)!=='mix'
+        || get_post_status($post_id)!=='private'
+        || (int)get_post_field('post_author',$post_id)!==get_current_user_id()
+        || (string)get_post_meta($post_id,'_dcmix_job_id',true)!==$id) {
+        status_header(404);exit('Not found');
+    }
+    $download=isset($_GET['download']) && $_GET['download']==='1';
+    $url=dcmix_signed_private_url($id,$download);
+    if (!$url) {status_header(503);exit('Private download service unavailable');}
+    nocache_headers();
+    header('X-Robots-Tag: noindex, nofollow',true);
+    wp_safe_redirect($url,302,'Dancecore Private Mix');
+    exit;
+}
+add_action('admin_post_dcmix_private_download','dcmix_private_download');
+add_action('admin_post_nopriv_dcmix_private_download','dcmix_private_download');
+
+/**
  * Make the generated remote MP3 behave like an ordinary native music attachment.
  * This filter applies ONLY to attachments minted by this isolated bridge.
  */
@@ -240,6 +306,8 @@ add_filter('wp_get_attachment_url',static function($url,$attachment_id){
     $file=(string)get_post_meta((int)$attachment_id,'_wp_attached_file',true);
     if ($file==='generated-mixes/'.$job_id.'.mp3')
         return home_url('/dc-media/'.$file);
+    if ($file==='private-mixes/'.$job_id.'.mp3')
+        return dcmix_private_link($job_id);
     return $url;
 },120,2);
 
@@ -273,7 +341,10 @@ function dcmix_publish_mix($job,array $payload) {
         $track_title=get_the_title($track_id);
         $source_lines[]=($index+1).'. '.($artist!==''?$artist.' — ':'').$track_title;
     }
-    $description='Generated and published by the user via the auto-mix tool.';
+    $is_private=($sources['visibility']??'public')==='private';
+    $description=$is_private
+       ? 'Generated privately by the user via the auto-mix tool.'
+       : 'Generated and published by the user via the auto-mix tool.';
     if (!$mix_id) {
         $created=wp_insert_post([
             'post_type'=>'mix','post_status'=>'draft','post_title'=>$title,
@@ -302,7 +373,7 @@ function dcmix_publish_mix($job,array $payload) {
     ]);
     $attachment_id=absint(get_post_meta($mix_id,'file',true));
     $output=(string)$payload['output_path'];
-    $url=home_url('/dc-media/'.$output);
+    $url=$is_private?dcmix_private_link($job_id):home_url('/dc-media/'.$output);
     if (!$attachment_id) {
         // An interrupted earlier attempt can leave a parented attachment.
         // Reuse it rather than creating duplicate orphan entries.
@@ -334,7 +405,7 @@ function dcmix_publish_mix($job,array $payload) {
     update_post_meta($mix_id,'file',$attachment_id);
     if (wp_get_attachment_url($attachment_id)!==$url)
         return new WP_Error('dcmix_attachment','Generated audio URL could not be registered',['status'=>503]);
-    $published=wp_update_post(['ID'=>$mix_id,'post_status'=>'publish'],true);
+    $published=wp_update_post(['ID'=>$mix_id,'post_status'=>$is_private?'private':'publish'],true);
     if (is_wp_error($published)) return $published;
     return ['post_id'=>$mix_id,'post_url'=>get_permalink($mix_id)];
 }
@@ -358,10 +429,14 @@ function dcmix_report(WP_REST_Request $request) {
         $output=(string)$request->get_param('output_path');
         $sha=(string)$request->get_param('sha256');
         $bytes=(int)$request->get_param('bytes');
-        if ($output!=='generated-mixes/'.$id.'.mp3'
+        $job_request=json_decode((string)$job->request_json,true);
+        $private=($job_request['visibility']??'public')==='private';
+        $expected=($private?'private-mixes/':'generated-mixes/').$id.'.mp3';
+        if ($output!==$expected
             || !preg_match('/^[a-f0-9]{64}$/',$sha) || $bytes<1024 || $bytes>2147483648)
             return new WP_Error('dcmix_output','Invalid render receipt',['status'=>400]);
-        $url=home_url('/dc-media/'.$output);
+        $url=$private?dcmix_signed_private_url($id):home_url('/dc-media/'.$output);
+        if (!$url)return new WP_Error('dcmix_private_config','Private URL signing unavailable',['status'=>503]);
         // A direct HEAD verifies the media origin actually serves the output.
         $head=wp_remote_head($url,['timeout'=>10,'redirection'=>0]);
         if (is_wp_error($head) || wp_remote_retrieve_response_code($head)!==200)
@@ -369,7 +444,9 @@ function dcmix_report(WP_REST_Request $request) {
         $seen=(int)wp_remote_retrieve_header($head,'content-length');
         if ($seen && $seen!==$bytes)
             return new WP_Error('dcmix_output_size','Output file length differs from receipt',['status'=>503]);
-        $payload+=['output_path'=>$output,'url'=>$url,'sha256'=>$sha,'bytes'=>$bytes];
+        $payload+=['output_path'=>$output,
+          'url'=>$private?dcmix_private_link($id):$url,
+          'sha256'=>$sha,'bytes'=>$bytes];
         $transitions=$request->get_param('transitions');
         if (is_array($transitions)) $payload['transitions']=array_slice($transitions,0,59);
         $published=dcmix_publish_mix($job,$payload);
@@ -406,7 +483,8 @@ function dcmix_mark_removed_mix($post_id) {
     if (!$row || !in_array($row->status,['completed','delete_pending'],true))return false;
     $result=json_decode((string)$row->result_json,true);
     if (!is_array($result) || (int)($result['post_id']??0)!==$post_id
-      || (string)($result['output_path']??'')!=='generated-mixes/'.$id.'.mp3'
+      || !in_array((string)($result['output_path']??''),
+           ['generated-mixes/'.$id.'.mp3','private-mixes/'.$id.'.mp3'],true)
       || !preg_match('/^[a-f0-9]{64}$/',(string)($result['sha256']??'')))return false;
     if ($row->status==='delete_pending')return true;
     return $wpdb->update($table,['status'=>'delete_pending'],
@@ -427,12 +505,14 @@ function dcmix_cleanup_list() {
         if (!wp_is_uuid($id))continue;
         $result=json_decode((string)$row->result_json,true);
         if (!is_array($result)
-           || (string)($result['output_path']??'')!=='generated-mixes/'.$id.'.mp3'
+           || !in_array((string)($result['output_path']??''),
+                ['generated-mixes/'.$id.'.mp3','private-mixes/'.$id.'.mp3'],true)
            || !preg_match('/^[a-f0-9]{64}$/',(string)($result['sha256']??'')))continue;
         $post_id=absint($result['post_id']??0);
         $status=$post_id?get_post_status($post_id):false;
         if ($status!==false && $status!=='trash')continue;
-        $items[]=['id'=>$id,'sha256'=>(string)$result['sha256']];
+        $items[]=['id'=>$id,'sha256'=>(string)$result['sha256'],
+          'storage'=>str_starts_with((string)$result['output_path'],'private-mixes/')?'private':'public'];
     }
     return ['items'=>$items];
 }
@@ -503,7 +583,8 @@ function dcmix_list_jobs() {
         unset($row['result_json'],$row['request_json']);
         if ($row['result'] && isset($row['result']['post_id'])) {
             $post_status=get_post_status((int)$row['result']['post_id']);
-            if ($row['status']!=='completed' || $post_status!=='publish') {
+            $expected_status=($original['visibility']??'public')==='private'?'private':'publish';
+            if ($row['status']!=='completed' || $post_status!==$expected_status) {
                 unset($row['result']['post_url'],$row['result']['url']);
                 if ($row['status']==='completed')$row['status']='deleted';
             }
@@ -583,7 +664,10 @@ add_action('init',static function(){
             $title='Auto-DJ Mix — '.$name.' · '.get_post_time('Y-m-d',true,$post_id);
             wp_update_post(['ID'=>$post_id,'post_title'=>$title]);
         }
-        $description='Generated and published by the user via the auto-mix tool.';
+        $is_private=get_post_status($post_id)==='private';
+    $description=$is_private
+       ? 'Generated privately by the user via the auto-mix tool.'
+       : 'Generated and published by the user via the auto-mix tool.';
         update_post_meta($post_id,'title',$title);
         update_post_meta($post_id,'info',$description);
         if (get_post_field('post_content',$post_id)!==$description)
@@ -622,7 +706,7 @@ add_shortcode('dcmix_generator',static function(){
     ob_start();
     ?>
     <section class="dcmix-ui" style="max-width:690px">
-      <p>Auto-DJ → MP3. Choose a playlist to make and publish a continuous Mix Set.
+      <p>Auto-DJ → MP3. Choose a playlist to generate a public or private Mix Set.
          Only eligible site-hosted CC0 tracks can be included.</p>
       <form id="dcmix-submit">
         <label>Playlist
@@ -671,12 +755,14 @@ add_shortcode('dcmix_generator',static function(){
       async function queue(){
         if(activeRequest)return;
         if(typeof window.dcmixConfirmRights!=='function')return;
-        if(!(await window.dcmixConfirmRights()))return;
+        const visibility=await window.dcmixConfirmRights();
+        if(!visibility)return;
         activeRequest=true;main.disabled=true;recycle.hidden=true;
         msg.textContent='Queueing…';
         const params=Object.fromEntries(new FormData(form));
         for(const key of ['playlist_id','bars','advance_bars'])params[key]=Number(params[key]);
-        params.rights_confirmed=true;
+        params.visibility=visibility;
+        params.rights_confirmed=visibility==='public';
         try{
           const response=await call('POST',params);
           main.dataset.openUrl='';
@@ -712,6 +798,30 @@ add_shortcode('dcmix_generator',static function(){
           }else if(match.status==='failed')msg.textContent='Last generation failed. You can retry.';
         }catch(error){msg.textContent=error.message;}
       }
+      // The community guide still ships an obsolete 'preview / coming later'
+      // announcement. Override its copy without touching the other plugin.
+      function updateGuide(){
+        const guide=document.querySelector('#dcx-community-guide');
+        if(!guide)return;
+        const title=guide.querySelector('.dcx-guide-heading');
+        const message=guide.querySelector('.dcx-guide-message');
+        const cta=guide.querySelector('.dcx-guide-cta');
+        const obsolete=/AI Mix Generator|Create your first mix|Mixes & playlists|Curate a playlist/i.test(title?.textContent||'') ||
+          /Auto-DJ.*(?:development|coming later)|no downloadable generated mix yet|AI audio rendering is in development/i.test(message?.textContent||'');
+        if(!obsolete)return;
+        const heading='Auto-DJ Mix Generator';
+        const copy='Turn a playlist of eligible recordings into a downloadable MP3 Mix Set.';
+        if(title&&title.textContent!==heading)title.textContent=heading;
+        if(message&&message.textContent!==copy)message.textContent=copy;
+        if(cta){
+          if(cta.textContent!=='Generate Mix Set')cta.textContent='Generate Mix Set';
+          if(cta.getAttribute('href')!=='/mix-generator/')cta.setAttribute('href','/mix-generator/');
+        }
+      }
+      const guideCopy=document.querySelector('#dcx-community-guide');
+      if(guideCopy)new MutationObserver(updateGuide).observe(guideCopy,{childList:true,subtree:true,characterData:true});
+      updateGuide();
+      document.addEventListener('dcx:navigated',()=>{updateGuide();place();});
       refresh();setInterval(refresh,12000);
     })();
     </script>
@@ -743,7 +853,10 @@ add_action('wp_footer',static function(){
     .dcmix-confirm-dialog h2{font-size:17px!important;line-height:1.2!important;margin:0 0 8px!important}
     .dcmix-confirm-dialog p{margin:0 0 10px}
     .dcmix-confirm-dialog label{display:flex;gap:8px;align-items:flex-start;cursor:pointer;margin:8px 0 13px}
-    .dcmix-confirm-dialog input[type="checkbox"]{margin:3px 0 0;flex:none}
+    .dcmix-confirm-dialog input[type="checkbox"],.dcmix-confirm-dialog input[type="radio"]{margin:3px 0 0;flex:none}
+    .dcmix-confirm-dialog fieldset{border:1px solid #b9a4bf;padding:5px 9px;margin:0 0 9px}
+    .dcmix-confirm-dialog legend{font-weight:700;padding:0 4px}
+    .dcmix-confirm-dialog fieldset label{margin:5px 0}
     .dcmix-dialog-actions{display:flex;justify-content:flex-end;gap:8px}
     .dcmix-dialog-actions button{font:inherit;font-weight:700;font-size:13px;padding:6px 11px;
       border:1px solid #8b468b;border-radius:3px;cursor:pointer}
@@ -755,10 +868,16 @@ add_action('wp_footer',static function(){
       <div class="dcmix-confirm-dialog" role="dialog" aria-modal="true"
            aria-labelledby="dcmix-rights-title" tabindex="-1">
         <h2 id="dcmix-rights-title">Generate Mix Set</h2>
-        <p>The Auto-DJ will combine eligible playlist tracks into a downloadable MP3
-           and publish it under your account. Processing may take several minutes.</p>
-        <label><input id="dcmix-rights-check" type="checkbox">
-          <span>I confirm the included recordings are permitted for mixing and
+        <p>The Auto-DJ combines eligible playlist recordings into an MP3.
+           Processing may take several minutes.</p>
+        <fieldset class="dcmix-visibility"><legend>Who can access this Mix Set?</legend>
+          <label><input type="radio" name="dcmix-visibility" value="public" checked>
+            Publish publicly under my account</label>
+          <label><input type="radio" name="dcmix-visibility" value="private">
+            Keep private — only I can listen or download</label>
+        </fieldset>
+        <label id="dcmix-public-consent"><input id="dcmix-rights-check" type="checkbox">
+          <span>I confirm the recordings are permitted for mixing and
           redistribution, and I accept responsibility for publishing this mix.</span>
         </label>
         <div class="dcmix-dialog-actions">
@@ -772,35 +891,43 @@ add_action('wp_footer',static function(){
       const backdrop=document.getElementById('dcmix-rights-modal'),
         dialog=backdrop.querySelector('[role="dialog"]'),
         check=document.getElementById('dcmix-rights-check'),
+        consent=document.getElementById('dcmix-public-consent'),
+        radios=[...backdrop.querySelectorAll('input[name="dcmix-visibility"]')],
         yes=backdrop.querySelector('.dcmix-dialog-accept'),
         no=backdrop.querySelector('.dcmix-dialog-cancel');
       let finish=null,priorFocus=null;
+      function mode(){return radios.find(x=>x.checked)?.value||'public';}
+      function sync(){
+        consent.hidden=mode()==='private';
+        yes.disabled=mode()==='public'&&!check.checked;
+      }
       function close(ok){
         if(!finish)return;
         const resolve=finish;finish=null;
         backdrop.hidden=true;
         document.removeEventListener('keydown',keydown,true);
         if(priorFocus&&priorFocus.isConnected)priorFocus.focus();
-        resolve(ok);
+        resolve(ok?mode():null);
       }
       function keydown(event){
         if(event.key==='Escape'){event.preventDefault();close(false);}
         if(event.key==='Tab'){
-          const focusables=[check,no,yes].filter(x=>!x.disabled);
+          const focusables=[...radios,...(consent.hidden?[]:[check]),no,yes].filter(x=>!x.disabled);
           const current=focusables.indexOf(document.activeElement);
           if(event.shiftKey && current===0){event.preventDefault();focusables[focusables.length-1].focus();}
           else if(!event.shiftKey && current===focusables.length-1){event.preventDefault();focusables[0].focus();}
         }
       }
-      check.addEventListener('change',()=>{yes.disabled=!check.checked;});
+      check.addEventListener('change',sync);
+      radios.forEach(r=>r.addEventListener('change',sync));
       no.addEventListener('click',()=>close(false));
-      yes.addEventListener('click',()=>{if(check.checked)close(true);});
+      yes.addEventListener('click',()=>{if(!yes.disabled)close(true);});
       backdrop.addEventListener('click',e=>{if(e.target===backdrop)close(false);});
       window.dcmixConfirmRights=function(){
         if(finish)return Promise.resolve(false);
         return new Promise(resolve=>{
           finish=resolve;priorFocus=document.activeElement;
-          check.checked=false;yes.disabled=true;
+          check.checked=false;radios[0].checked=true;sync();
           backdrop.hidden=false;document.addEventListener('keydown',keydown,true);
           dialog.focus();
         });
@@ -881,13 +1008,15 @@ add_action('wp_footer',static function(){
       async function submit(id,entry){
         if(!loggedIn){location.assign(loginUrl);return;}
         if(typeof window.dcmixConfirmRights!=='function')return;
-        if(!(await window.dcmixConfirmRights()))return;
+        const visibility=await window.dcmixConfirmRights();
+        if(!visibility)return;
         entry.button.disabled=true;
         entry.recycle.hidden=true;
         entry.feedback.textContent='Queueing…';
         try{
           const result=await call('POST',{
-            playlist_id:id,bars:8,advance_bars:4,rights_confirmed:true
+            playlist_id:id,bars:8,advance_bars:4,visibility,
+            rights_confirmed:visibility==='public'
           });
           entry.button.dataset.openUrl='';
           entry.button.textContent='Generate Mix Set';
@@ -989,7 +1118,7 @@ add_action('wp_footer',static function(){
     #dcmix-live-status{position:absolute;z-index:9004;width:min(270px,calc(100vw - 20px));
       box-sizing:border-box;padding:9px 11px;background:#f8f3f9;
       border:1px solid #b995bd;border-radius:5px;box-shadow:0 3px 12px rgba(35,15,40,.18);
-      color:#38263c;font-size:12px;line-height:1.35}
+      color:#38263c;font-size:12px;line-height:1.35;text-align:left}
     #dcmix-live-status strong{font-size:13px}
     #dcmix-live-status .dcmix-status-line{display:flex;align-items:center;gap:8px}
     #dcmix-live-status .dcmix-status-detail{margin:4px 0 0 22px}
@@ -1019,16 +1148,18 @@ add_action('wp_footer',static function(){
       function place(){
         const guide=document.querySelector('#dcx-community-guide');
         const rect=guide&&!guide.hidden?guide.getBoundingClientRect():null;
-        if(rect&&rect.height>0){
-          panel.style.left=Math.max(8,rect.left+window.scrollX)+'px';
-          panel.style.top=Math.max(5,rect.bottom+window.scrollY+9)+'px';
-          panel.style.right='auto';
-        }else{
-          panel.style.left='auto';
-          panel.style.right='12px';
-          const shell=document.querySelector('.dcx-list-region');
-          const anchor=shell?shell.getBoundingClientRect().top+window.scrollY:135;
-          panel.style.top=Math.max(120,anchor)+'px';
+        // The status belongs to the LEFT help queue, including if a guide was dismissed.
+        const left=rect&&rect.width>0?rect.left+window.scrollX:12+window.scrollX;
+        const anchor=rect&&rect.height>0?rect.bottom+window.scrollY+8:
+          (document.querySelector('.dcx-list-region')?.getBoundingClientRect().top||140)+window.scrollY;
+        panel.style.left=Math.max(8,left)+'px';
+        panel.style.right='auto';
+        panel.style.top=Math.max(120,anchor)+'px';
+        if(guide){
+          const style=getComputedStyle(guide);
+          for(const key of ['backgroundColor','color','borderColor','borderRadius','boxShadow','fontFamily'])
+            if(style[key])panel.style[key]=style[key];
+          if(rect&&rect.width>0)panel.style.width=Math.min(270,rect.width)+'px';
         }
       }
       function show(job){
@@ -1088,6 +1219,30 @@ add_action('wp_footer',static function(){
       const guide=document.querySelector('#dcx-community-guide');
       if(guide)new MutationObserver(place).observe(guide,{attributes:true,
         attributeFilter:['hidden','style','class']});
+      // The community guide still ships an obsolete 'preview / coming later'
+      // announcement. Override its copy without touching the other plugin.
+      function updateGuide(){
+        const guide=document.querySelector('#dcx-community-guide');
+        if(!guide)return;
+        const title=guide.querySelector('.dcx-guide-heading');
+        const message=guide.querySelector('.dcx-guide-message');
+        const cta=guide.querySelector('.dcx-guide-cta');
+        const obsolete=/AI Mix Generator|Create your first mix|Mixes & playlists|Curate a playlist/i.test(title?.textContent||'') ||
+          /Auto-DJ.*(?:development|coming later)|no downloadable generated mix yet|AI audio rendering is in development/i.test(message?.textContent||'');
+        if(!obsolete)return;
+        const heading='Auto-DJ Mix Generator';
+        const copy='Turn a playlist of eligible recordings into a downloadable MP3 Mix Set.';
+        if(title&&title.textContent!==heading)title.textContent=heading;
+        if(message&&message.textContent!==copy)message.textContent=copy;
+        if(cta){
+          if(cta.textContent!=='Generate Mix Set')cta.textContent='Generate Mix Set';
+          if(cta.getAttribute('href')!=='/mix-generator/')cta.setAttribute('href','/mix-generator/');
+        }
+      }
+      const guideCopy=document.querySelector('#dcx-community-guide');
+      if(guideCopy)new MutationObserver(updateGuide).observe(guideCopy,{childList:true,subtree:true,characterData:true});
+      updateGuide();
+      document.addEventListener('dcx:navigated',()=>{updateGuide();place();});
       refresh();setInterval(refresh,12000);
     })();
     </script>
