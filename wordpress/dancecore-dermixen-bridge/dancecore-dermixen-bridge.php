@@ -572,28 +572,113 @@ add_action('wp_head',static function(){
 });
 
 add_shortcode('dcmix_generator',static function(){
-    if (!is_user_logged_in()) return '<p>Log in to create a DJ mix.</p>';
+    if (!is_user_logged_in())
+        return '<p>Log in to generate and publish an Auto-DJ Mix Set.</p>';
     global $wpdb;
     $table=$wpdb->prefix.'dc_lists';
     $lists=$wpdb->get_results($wpdb->prepare(
       "SELECT id,title FROM $table WHERE user_id=%d OR visibility='public' ORDER BY id DESC LIMIT 100",
       get_current_user_id()
     ));
-    $api=esc_url_raw(rest_url('dcmix/v1/jobs'));
+    $api=rest_url('dcmix/v1/jobs');
     $nonce=wp_create_nonce('wp_rest');
     ob_start();
-    echo '<div class="dcmix-ui" style="max-width:680px"><p>Create a continuous DJ mix from eligible CC0 on-site tracks. External recordings are excluded.</p>';
-    echo '<form id="dcmix-submit"><label>Playlist <select name="playlist_id" required>';
-    foreach($lists as $list)
-        echo '<option value="'.absint($list->id).'">'.esc_html($list->title).'</option>';
-    echo '</select></label> <label>Fade bars <input name="bars" type="number" min="1" max="16" value="8" style="width:60px"></label> ';
-    echo '<label>Earlier bars <input name="advance_bars" type="number" min="0" max="8" value="4" style="width:60px"></label> ';
-    echo '<button type="submit">Generate mix</button></form><p id="dcmix-message" role="status"></p><div id="dcmix-jobs"></div></div>';
-    echo '<script>(function(){const root=document.querySelector(".dcmix-ui"),form=document.getElementById("dcmix-submit"),message=document.getElementById("dcmix-message"),jobs=document.getElementById("dcmix-jobs");';
-    echo 'const api='.wp_json_encode($api).',nonce='.wp_json_encode($nonce).';';
-    echo 'async function call(method,body){const res=await fetch(api,{method,credentials:"same-origin",headers:{"Content-Type":"application/json","X-WP-Nonce":nonce},body:body?JSON.stringify(body):undefined});const data=await res.json();if(!res.ok)throw Error(data.message||"Request failed");return data;}';
-    echo 'async function refresh(){try{const data=await call("GET");jobs.replaceChildren();for(const j of data.jobs){const p=document.createElement("p");p.textContent=j.created_at+" · "+j.status+" · "+j.id.slice(0,8);if(j.result&&j.result.post_url){const a=document.createElement("a");a.href=j.result.post_url;a.textContent=" · Open published mix";p.append(a);}if(j.result&&j.result.url){const a=document.createElement("a");a.href=j.result.url;a.textContent=" · MP3";p.append(a);}if(j.error_message)p.append(" · "+j.error_message);jobs.append(p);}}catch(e){message.textContent=e.message;}}';
-    echo 'form.addEventListener("submit",async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(form));for(const key of ["playlist_id","bars","advance_bars"])data[key]=Number(data[key]);message.textContent="Submitting...";try{const r=await call("POST",data);message.textContent="Queued "+r.included+" tracks ("+r.omitted.length+" ineligible skipped).";refresh();}catch(err){message.textContent=err.message;}});refresh();setInterval(refresh,30000);})();</script>';
+    ?>
+    <section class="dcmix-ui" style="max-width:690px">
+      <p>Auto-DJ → MP3. Choose a playlist to make and publish a continuous Mix Set.
+         Only eligible site-hosted CC0 tracks can be included.</p>
+      <form id="dcmix-submit">
+        <label>Playlist
+          <select name="playlist_id" required>
+          <?php foreach($lists as $list): ?>
+            <option value="<?php echo absint($list->id); ?>"><?php echo esc_html($list->title); ?></option>
+          <?php endforeach; ?>
+          </select>
+        </label>
+        <label>Crossfade bars <input name="bars" type="number" min="1" max="16" value="8" style="width:65px"></label>
+        <label>Earlier bars <input name="advance_bars" type="number" min="0" max="8" value="4" style="width:65px"></label>
+        <span class="dcmix-tool-actions">
+          <button type="submit" id="dcmix-tool-main">Generate Mix Set</button>
+          <button type="button" id="dcmix-tool-recycle" hidden title="Regenerate Mix Set — playlist changed"
+            aria-label="Regenerate Mix Set because playlist changed">↻</button>
+        </span>
+      </form>
+      <p id="dcmix-message" role="status" aria-live="polite"></p>
+    </section>
+    <style>
+    .dcmix-ui form{display:flex;align-items:end;gap:9px;flex-wrap:wrap;font-size:13px}
+    .dcmix-ui form label{display:grid;gap:3px}
+    .dcmix-ui form select{max-width:240px}
+    .dcmix-ui #dcmix-tool-recycle{font-size:20px;line-height:1;border:1px solid #8b468b;
+      padding:3px 7px;background:#f6f2f7;color:#53365a;border-radius:3px;margin-left:5px}
+    .dcmix-ui #dcmix-tool-recycle[hidden]{display:none}
+    </style>
+    <script>
+    (function(){
+      const form=document.getElementById('dcmix-submit');
+      if(!form)return;
+      const main=document.getElementById('dcmix-tool-main'),
+        recycle=document.getElementById('dcmix-tool-recycle'),
+        msg=document.getElementById('dcmix-message'),
+        select=form.querySelector('select[name="playlist_id"]');
+      const api=<?php echo wp_json_encode($api); ?>,nonce=<?php echo wp_json_encode($nonce); ?>;
+      let activeRequest=false;
+      async function call(method,body){
+        const response=await fetch(api,{method,credentials:'same-origin',cache:'no-store',
+          headers:{'Content-Type':'application/json','X-WP-Nonce':nonce},
+          body:body?JSON.stringify(body):undefined});
+        const data=await response.json();
+        if(!response.ok)throw Error(data.message||'Request failed');
+        return data;
+      }
+      async function queue(){
+        if(activeRequest)return;
+        if(typeof window.dcmixConfirmRights!=='function')return;
+        if(!(await window.dcmixConfirmRights()))return;
+        activeRequest=true;main.disabled=true;recycle.hidden=true;
+        msg.textContent='Queueing…';
+        const params=Object.fromEntries(new FormData(form));
+        for(const key of ['playlist_id','bars','advance_bars'])params[key]=Number(params[key]);
+        params.rights_confirmed=true;
+        try{
+          const response=await call('POST',params);
+          main.dataset.openUrl='';
+          main.textContent='Generate Mix Set';
+          msg.textContent='Queued '+response.included+' tracks ('+response.omitted.length+' excluded). Generating…';
+          window.dispatchEvent(new CustomEvent('dcmix-job-queued',{detail:{id:response.id}}));
+          refresh();
+        }catch(error){main.disabled=false;msg.textContent=error.message;}
+        finally{activeRequest=false;}
+      }
+      form.addEventListener('submit',event=>{
+        event.preventDefault();
+        if(main.dataset.openUrl){location.assign(main.dataset.openUrl);return;}
+        queue();
+      });
+      recycle.addEventListener('click',()=>queue());
+      select.addEventListener('change',refresh);
+      async function refresh(){
+        if(activeRequest)return;
+        try{
+          const data=await call('GET');
+          const match=(data.jobs||[]).find(j=>Number(j.source_list_id)===Number(select.value));
+          main.disabled=false;main.dataset.openUrl='';main.textContent='Generate Mix Set';
+          recycle.hidden=true;msg.textContent='';
+          if(!match)return;
+          if(match.status==='queued'||match.status==='running'){
+            main.disabled=true;
+            msg.textContent=match.status==='queued'?'Queued…':'Generating Mix Set…';
+          }else if(match.status==='completed'&&match.result&&match.result.post_url){
+            main.textContent='Open Generated Mix Set';
+            main.dataset.openUrl=match.result.post_url;
+            recycle.hidden=match.playlist_changed!==true;
+          }else if(match.status==='failed')msg.textContent='Last generation failed. You can retry.';
+        }catch(error){msg.textContent=error.message;}
+      }
+      refresh();setInterval(refresh,12000);
+    })();
+    </script>
+    <?php
     return ob_get_clean();
 });
 
