@@ -2,11 +2,11 @@
 /**
  * Plugin Name: Dancecore Dermixen Bridge
  * Description: Site-side job queue for the external Dermixen container. Audio is never mixed in PHP.
- * Version: 0.1.0
+ * Version: 0.2.0
  * Requires PHP: 8.0
  */
 defined('ABSPATH') || exit;
-const DCMIX_BRIDGE_VERSION = '0.1.0';
+const DCMIX_BRIDGE_VERSION = '0.2.0';
 
 function dcmix_table(): string {
     global $wpdb;
@@ -33,9 +33,8 @@ register_activation_hook(__FILE__, static function () {
        KEY queue (status,created_at),
        KEY owner (user_id,created_at)
     ) $charset;");
-    if (!get_option('dcmix_worker_token')) {
-        add_option('dcmix_worker_token',bin2hex(random_bytes(32)),'','no');
-    }
+    // The worker's random bearer token stays on the storage host.
+    // WordPress stores only its SHA-256 verifier after admin pairing.
     if (!get_page_by_path('mix-generator')) {
         wp_insert_post([
           'post_type'=>'page','post_status'=>'publish',
@@ -50,8 +49,9 @@ function dcmix_worker_auth(WP_REST_Request $request) {
     if (!preg_match('/^Bearer ([a-f0-9]{64})$/D', $header, $matches)) {
         return new WP_Error('dcmix_auth', 'Worker authentication required', ['status'=>403]);
     }
-    $expected = (string)get_option('dcmix_worker_token','');
-    return strlen($expected)===64 && hash_equals($expected,$matches[1])
+    $expected_hash = (string)get_option('dcmix_worker_token_hash','');
+    $presented_hash = hash('sha256',$matches[1]);
+    return strlen($expected_hash)===64 && hash_equals($expected_hash,$presented_hash)
         ? true : new WP_Error('dcmix_auth','Worker authentication failed',['status'=>403]);
 }
 function dcmix_user_auth() {
@@ -106,6 +106,18 @@ function dcmix_collect_tracks(int $list_id, int $user_id) {
 }
 
 add_action('rest_api_init',static function(){
+    register_rest_route('dcmix/v1','/worker/configure',[
+      'methods'=>'POST',
+      'callback'=>static function(WP_REST_Request $request) {
+          $digest=(string)$request->get_param('token_sha256');
+          if (!preg_match('/^[a-f0-9]{64}$/D',$digest))
+              return new WP_Error('dcmix_digest','Expected a SHA-256 worker verifier',['status'=>400]);
+          update_option('dcmix_worker_token_hash',$digest,false);
+          delete_option('dcmix_worker_token'); // obsolete plaintext key
+          return ['configured'=>true];
+      },
+      'permission_callback'=>static function(){return current_user_can('manage_options');}
+    ]);
     register_rest_route('dcmix/v1','/worker/claim',[
       'methods'=>'POST','callback'=>'dcmix_claim','permission_callback'=>'dcmix_worker_auth'
     ]);
@@ -263,16 +275,8 @@ add_shortcode('dcmix_generator',static function(){
 add_action('admin_menu',static function(){
     add_options_page('Dermixen worker','Dermixen worker','manage_options','dcmix-worker',static function(){
         if (!current_user_can('manage_options')) return;
-        if (isset($_POST['dcmix_rotate'])) {
-            check_admin_referer('dcmix_rotate');
-            update_option('dcmix_worker_token',bin2hex(random_bytes(32)),false);
-            echo '<div class="notice notice-success"><p>Worker token rotated. Update worker.env before restarting the container.</p></div>';
-        }
-        echo '<div class="wrap"><h1>Dermixen external worker</h1><p>This key is private. The Docker worker uses it for outbound HTTPS polling; WordPress never runs FFmpeg.</p>';
-        echo '<p>DCMIX_API: <code>'.esc_html(rest_url('dcmix/v1')).'</code></p>';
-        echo '<p>DCMIX_WORKER_TOKEN: <code>'.esc_html((string)get_option('dcmix_worker_token')).'</code></p>';
-        echo '<form method="post">';
-        wp_nonce_field('dcmix_rotate');
-        echo '<button class="button" type="submit" name="dcmix_rotate" value="1">Rotate token</button></form></div>';
+        echo '<div class="wrap"><h1>Dermixen external worker</h1><p>The container authenticates outbound HTTPS requests. WordPress stores only a SHA-256 verifier, not the secret itself.</p>';
+        echo '<p>Worker API: <code>'.esc_html(rest_url('dcmix/v1')).'</code></p>';
+        echo '<p>Status: <strong>'.(get_option('dcmix_worker_token_hash')?'paired':'not paired').'</strong></p></div>';
     });
 });
