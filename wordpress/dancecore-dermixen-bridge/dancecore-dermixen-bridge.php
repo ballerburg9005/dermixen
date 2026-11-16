@@ -695,33 +695,91 @@ add_action('wp_footer',static function(){
  * a compact, authenticated action after they have been rendered.
  */
 add_action('wp_footer',static function(){
-    if (!is_user_logged_in() || !is_post_type_archive('mix')) return;
+    if (!is_post_type_archive('mix'))return;
     $api=rest_url('dcmix/v1/jobs');
     $nonce=wp_create_nonce('wp_rest');
+    $generator=home_url('/mix-generator/');
+    $logged_in=is_user_logged_in();
+    $login=wp_login_url(home_url('/mixes/'));
     ?>
     <style>
-    .dcmix-quick {display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;margin-left:7px}
-    .dcmix-quick button {font:inherit;font-size:12px;padding:3px 8px;border:1px solid #b9a4bf;background:#f6f2f7;color:#53365a;border-radius:3px;cursor:pointer}
-    .dcmix-quick button:disabled {opacity:.65;cursor:default}
-    .dcmix-quick .dcmix-feedback {font-size:12px;color:#795580}
-    .dcmix-spinner {display:inline-block;width:13px;height:13px;vertical-align:-2px;flex:none;border:2px solid #d5b9d9;border-top-color:#713b81;border-radius:50%;animation:dcmix-rotate 850ms linear infinite}
-    @keyframes dcmix-rotate {to{transform:rotate(360deg)}}
-    @media(prefers-reduced-motion:reduce){.dcmix-spinner{animation:none;border-top-color:#713b81}}
+    .dcmix-quick{display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;margin:3px 7px 3px 0}
+    .dcmix-quick button{font:inherit;font-size:12px;padding:4px 8px;border:1px solid #b9a4bf;
+      background:#f6f2f7;color:#53365a;border-radius:3px;cursor:pointer;line-height:1.25}
+    .dcmix-quick button:hover:not(:disabled){background:#eadfec}
+    .dcmix-quick button:disabled{opacity:.65;cursor:default}
+    .dcmix-quick .dcmix-recycle{font-size:18px;padding:0 5px;line-height:23px;font-weight:700}
+    .dcmix-quick .dcmix-feedback{font-size:12px;color:#795580;display:inline-flex;gap:5px;align-items:center}
+    .dcmix-quick .dcmix-feedback:empty{display:none}
+    .dcmix-quick [hidden]{display:none!important}
+    .dcmix-spinner{display:inline-block;width:13px;height:13px;vertical-align:-2px;flex:none;
+      border:2px solid #d5b9d9;border-top-color:#713b81;border-radius:50%;
+      animation:dcmix-rotate 850ms linear infinite}
+    @keyframes dcmix-rotate{to{transform:rotate(360deg)}}
+    @media(prefers-reduced-motion:reduce){.dcmix-spinner{animation:none}}
     </style>
     <script>
     (function(){
       const api=<?php echo wp_json_encode($api); ?>;
       const nonce=<?php echo wp_json_encode($nonce); ?>;
+      const loggedIn=<?php echo wp_json_encode($logged_in); ?>;
+      const loginUrl=<?php echo wp_json_encode($login); ?>;
+      const generatorUrl=<?php echo wp_json_encode($generator); ?>;
+      // Match the existing Browse artists card exactly, under it.
+      const browse=document.querySelector('.dcx-side .dcxa-artists-cta');
+      if(browse && !document.querySelector('.dcmix-generator-cta')){
+        const box=document.createElement('a');
+        box.className=browse.className+' dcmix-generator-cta';
+        box.href=generatorUrl;
+        const heading=document.createElement('strong');
+        heading.textContent='Generate Mix Set from Playlist';
+        const caption=document.createElement('span');
+        caption.textContent='Auto-DJ → MP3 · choose a playlist';
+        box.append(heading,caption);
+        browse.insertAdjacentElement('afterend',box);
+      }
       const results=document.querySelector('.dcx-playlist-results');
       if(!results)return;
-      const buttons=new Map();
-      async function call(method,body) {
-        const response=await fetch(api,{method,credentials:'same-origin',
+      const entries=new Map();
+      async function call(method,body){
+        const response=await fetch(api,{method,credentials:'same-origin',cache:'no-store',
           headers:{'Content-Type':'application/json','X-WP-Nonce':nonce},
           body:body?JSON.stringify(body):undefined});
         const data=await response.json();
         if(!response.ok)throw Error(data.message||'Request failed');
         return data;
+      }
+      function clear(entry){
+        entry.button.textContent='Generate Mix Set';
+        entry.button.disabled=false;
+        entry.button.dataset.openUrl='';
+        entry.recycle.hidden=true;
+        entry.feedback.replaceChildren();
+      }
+      async function submit(id,entry){
+        if(!loggedIn){location.assign(loginUrl);return;}
+        if(typeof window.dcmixConfirmRights!=='function')return;
+        if(!(await window.dcmixConfirmRights()))return;
+        entry.button.disabled=true;
+        entry.recycle.hidden=true;
+        entry.feedback.textContent='Queueing…';
+        try{
+          const result=await call('POST',{
+            playlist_id:id,bars:8,advance_bars:4,rights_confirmed:true
+          });
+          entry.button.dataset.openUrl='';
+          entry.button.textContent='Generate Mix Set';
+          entry.feedback.replaceChildren();
+          const circle=document.createElement('span');
+          circle.className='dcmix-spinner';
+          circle.setAttribute('aria-hidden','true');
+          entry.feedback.append(circle,document.createTextNode(' Queued'));
+          window.dispatchEvent(new CustomEvent('dcmix-job-queued',{detail:{id:result.id}}));
+          refresh();
+        }catch(error){
+          entry.feedback.textContent=error.message;
+          entry.button.disabled=false;
+        }
       }
       for(const article of results.querySelectorAll('.dcx-mix-list-result')){
         const link=article.querySelector('.dcx-mix-list-title');
@@ -732,65 +790,61 @@ add_action('wp_footer',static function(){
         holder.className='dcmix-quick';
         const button=document.createElement('button');
         button.type='button';
-        button.textContent='Generate mix';
-        button.title='Create a finished MP3 DJ mix from eligible CC0 recordings in this playlist';
+        button.textContent='Generate Mix Set';
+        button.title='Make a finished Auto-DJ MP3 from eligible tracks in this playlist';
+        const recycle=document.createElement('button');
+        recycle.type='button';
+        recycle.className='dcmix-recycle';
+        recycle.textContent='↻';
+        recycle.title='Regenerate Mix Set — playlist changed since last generation';
+        recycle.setAttribute('aria-label','Regenerate Mix Set because playlist changed');
+        recycle.hidden=true;
         const feedback=document.createElement('span');
         feedback.className='dcmix-feedback';
         feedback.setAttribute('role','status');
-        holder.append(button,feedback);
-        article.append(holder);
-        buttons.set(id,{button,feedback});
-        button.addEventListener('click',async()=>{
-          button.disabled=true;
-          feedback.textContent='Queueing…';
-          try{
-            const r=await call('POST',{playlist_id:id,bars:8,advance_bars:4});
-            feedback.textContent='Queued '+r.included+' tracks'+(r.omitted.length?' · '+r.omitted.length+' skipped':'');
-            window.dispatchEvent(new CustomEvent('dcmix-job-queued',{detail:{id:r.id}}));
-            refresh();
-          }catch(e){
-            feedback.textContent=e.message;
-            button.disabled=false;
-          }
+        holder.append(button,recycle,feedback);
+        const openPlaylist=article.querySelector('.dcx-list-open');
+        if(openPlaylist)openPlaylist.before(holder);
+        else article.append(holder);
+        const entry={button,recycle,feedback};
+        entries.set(id,entry);
+        button.addEventListener('click',()=>{
+          if(button.dataset.openUrl){location.assign(button.dataset.openUrl);return;}
+          submit(id,entry);
         });
+        recycle.addEventListener('click',()=>submit(id,entry));
       }
       async function refresh(){
+        if(!loggedIn)return;
         try{
           const data=await call('GET');
           const seen=new Set();
+          // Newest request for a playlist always wins over prior completed jobs.
           for(const job of data.jobs||[]){
-            const listId=Number(job.source_list_id);
-            if(seen.has(listId))continue; // Never let an older job replace a newer active one.
-            seen.add(listId);
-            const entry=buttons.get(listId);
+            const id=Number(job.source_list_id);
+            if(seen.has(id))continue;
+            seen.add(id);
+            const entry=entries.get(id);
             if(!entry)continue;
-            if(['queued','running'].includes(job.status)){
+            clear(entry);
+            if(job.status==='queued'||job.status==='running'){
               entry.button.disabled=true;
-              entry.feedback.replaceChildren();
-              const spin=document.createElement('span');
-              spin.className='dcmix-spinner';
-              spin.setAttribute('aria-hidden','true');
-              entry.feedback.append(spin,
-                  document.createTextNode(job.status==='queued'?' Queued':' Generating…'));
+              const circle=document.createElement('span');
+              circle.className='dcmix-spinner';
+              circle.setAttribute('aria-hidden','true');
+              entry.feedback.append(circle,document.createTextNode(job.status==='queued'?' Queued':' Generating…'));
             }else if(job.status==='completed'&&job.result&&job.result.post_url){
-              entry.button.disabled=false;
-              entry.feedback.replaceChildren();
-              const a=document.createElement('a');
-              a.href=job.result.post_url;
-              a.textContent='Open generated mix';
-              entry.feedback.append(a);
+              entry.button.textContent='Open Generated Mix Set';
+              entry.button.dataset.openUrl=job.result.post_url;
+              entry.recycle.hidden=job.playlist_changed!==true;
             }else if(job.status==='failed'){
-              entry.button.disabled=false;
-              entry.feedback.textContent='Previous generation failed';
-            }else{
-              entry.button.disabled=false;
-              entry.feedback.textContent='';
+              entry.feedback.textContent='Generation failed';
             }
           }
-        }catch(e){/* keep playlist links and buttons usable */}
+        }catch(error){/* Leave previous status in place if offline. */}
       }
       refresh();
-      setInterval(refresh,20000);
+      setInterval(refresh,12000);
     })();
     </script>
     <?php
