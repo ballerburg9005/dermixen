@@ -186,6 +186,103 @@ function dcmix_claim() {
     return ['job'=>null];
 }
 
+/**
+ * Make the generated remote MP3 behave like an ordinary native music attachment.
+ * This filter applies ONLY to attachments minted by this isolated bridge.
+ */
+add_filter('wp_get_attachment_url',static function($url,$attachment_id){
+    $job_id=(string)get_post_meta((int)$attachment_id,'_dcmix_job_id',true);
+    if (!$job_id || !wp_is_uuid($job_id)) return $url;
+    $file=(string)get_post_meta((int)$attachment_id,'_wp_attached_file',true);
+    if ($file==='generated-mixes/'.$job_id.'.mp3')
+        return home_url('/dc-media/'.$file);
+    return $url;
+},120,2);
+
+/**
+ * Create a real WordPress Mix CPT attributed to the MEMBER WHO CLICKED
+ * Generate, never to the playlist curator or the worker service.
+ */
+function dcmix_publish_mix($job,array $payload) {
+    $job_id=(string)$job->id;
+    $existing=get_posts([
+      'post_type'=>'mix','post_status'=>['draft','pending','publish','private'],
+      'posts_per_page'=>1,'fields'=>'ids','no_found_rows'=>true,
+      'meta_key'=>'_dcmix_job_id','meta_value'=>$job_id
+    ]);
+    $mix_id=$existing?(int)$existing[0]:0;
+    $user_id=(int)$job->user_id;
+    $user=get_userdata($user_id);
+    if (!$user || !post_type_exists('mix')) return new WP_Error(
+       'dcmix_author','Missing original member or Mix post type',['status'=>503]);
+    global $wpdb;
+    $playlist=$wpdb->get_row($wpdb->prepare(
+      "SELECT title FROM {$wpdb->prefix}dc_lists WHERE id=%d",(int)$job->source_list_id));
+    $playlist_title=$playlist?sanitize_text_field((string)$playlist->title):'Community playlist';
+    $title='DJ Mix — '.$playlist_title.' · '.gmdate('Y-m-d');
+    $sources=json_decode((string)$job->request_json,true);
+    $source_lines=[];
+    foreach(($sources['tracks']??[]) as $index=>$track) {
+        $track_id=absint($track['track_id']??0);
+        if (!$track_id) continue;
+        $artist=trim((string)get_post_meta($track_id,'artist',true));
+        $track_title=get_the_title($track_id);
+        $source_lines[]=($index+1).'. '.($artist!==''?$artist.' — ':'').$track_title;
+    }
+    $description='DJ mix generated automatically from the community playlist "'.$playlist_title.
+       '". Beatmatched transitions: '.(int)($sources['bars']??8).
+       ' bars; outro advance: '.(int)($sources['advance_bars']??4).
+       ' bars. Only eligible CC0 recordings were included.';
+    if (!$mix_id) {
+        $created=wp_insert_post([
+            'post_type'=>'mix','post_status'=>'draft','post_title'=>$title,
+            'post_author'=>$user_id,'comment_status'=>'open',
+            'post_content'=>$description
+        ],true);
+        if (is_wp_error($created)) return $created;
+        $mix_id=(int)$created;
+    }
+    update_post_meta($mix_id,'_dcmix_job_id',$job_id);
+    update_post_meta($mix_id,'title',$title);
+    update_post_meta($mix_id,'artist',(string)$user->display_name);
+    update_post_meta($mix_id,'info',$description);
+    update_post_meta($mix_id,'license','CC0');
+    update_post_meta($mix_id,'_dcx_relationship','ai');
+    update_post_meta($mix_id,'_dcx_source_playlist',(int)$job->source_list_id);
+    update_post_meta($mix_id,'_dcx_tracklist',implode("\n",$source_lines));
+    update_post_meta($mix_id,'_dcmix_settings',[
+        'bars'=>(int)($sources['bars']??8),
+        'advance_bars'=>(int)($sources['advance_bars']??4),
+        'source_track_ids'=>array_map('intval',array_column($sources['tracks']??[],'track_id')),
+        'transitions'=>$payload['transitions']??[]
+    ]);
+    $attachment_id=absint(get_post_meta($mix_id,'file',true));
+    $output=(string)$payload['output_path'];
+    $url=home_url('/dc-media/'.$output);
+    if (!$attachment_id) {
+        $created=wp_insert_attachment([
+            'post_mime_type'=>'audio/mpeg','post_title'=>$title,
+            'post_status'=>'inherit','post_parent'=>$mix_id,'guid'=>$url
+        ],false,$mix_id,true);
+        if (is_wp_error($created)) return $created;
+        $attachment_id=(int)$created;
+    }
+    update_post_meta($attachment_id,'_dcmix_job_id',$job_id);
+    update_post_meta($attachment_id,'_wp_attached_file',$output);
+    update_post_meta($attachment_id,'_dc_remote_path',$output);
+    update_post_meta($attachment_id,'_dc_remote_sha256',(string)$payload['sha256']);
+    update_post_meta($attachment_id,'_dc_remote_status','ready');
+    update_post_meta($attachment_id,'_wp_attachment_metadata',[
+        'mime_type'=>'audio/mpeg','filesize'=>(int)$payload['bytes']
+    ]);
+    update_post_meta($mix_id,'file',$attachment_id);
+    if (wp_get_attachment_url($attachment_id)!==$url)
+        return new WP_Error('dcmix_attachment','Generated audio URL could not be registered',['status'=>503]);
+    $published=wp_update_post(['ID'=>$mix_id,'post_status'=>'publish'],true);
+    if (is_wp_error($published)) return $published;
+    return ['post_id'=>$mix_id,'post_url'=>get_permalink($mix_id)];
+}
+
 function dcmix_report(WP_REST_Request $request) {
     global $wpdb;
     $id=(string)$request->get_param('id');
@@ -219,6 +316,9 @@ function dcmix_report(WP_REST_Request $request) {
         $payload+=['output_path'=>$output,'url'=>$url,'sha256'=>$sha,'bytes'=>$bytes];
         $transitions=$request->get_param('transitions');
         if (is_array($transitions)) $payload['transitions']=array_slice($transitions,0,59);
+        $published=dcmix_publish_mix($job,$payload);
+        if (is_wp_error($published)) return $published;
+        $payload+=$published;
     } else {
         $error=mb_substr(sanitize_text_field((string)$request->get_param('error')),0,250);
     }
@@ -227,8 +327,9 @@ function dcmix_report(WP_REST_Request $request) {
       'error_message'=>$error,'result_json'=>wp_json_encode($payload)
     ],['id'=>$id,'status'=>'running'],['%s','%s','%s','%s'],['%s','%s']);
     if ($updated!==1) return new WP_Error('dcmix_race','Job updated concurrently',['status'=>409]);
-    // Never auto-publish a generated mix. The member controls publication.
-    return ['ok'=>true,'id'=>$id,'status'=>$status,'download'=>$payload['url']??null];
+    // The user explicitly requested publication by clicking Generate mix.
+    return ['ok'=>true,'id'=>$id,'status'=>$status,
+      'download'=>$payload['url']??null,'mix_url'=>$payload['post_url']??null];
 }
 
 function dcmix_list_jobs() {
@@ -267,7 +368,7 @@ add_shortcode('dcmix_generator',static function(){
     echo '<script>(function(){const root=document.querySelector(".dcmix-ui"),form=document.getElementById("dcmix-submit"),message=document.getElementById("dcmix-message"),jobs=document.getElementById("dcmix-jobs");';
     echo 'const api='.wp_json_encode($api).',nonce='.wp_json_encode($nonce).';';
     echo 'async function call(method,body){const res=await fetch(api,{method,credentials:"same-origin",headers:{"Content-Type":"application/json","X-WP-Nonce":nonce},body:body?JSON.stringify(body):undefined});const data=await res.json();if(!res.ok)throw Error(data.message||"Request failed");return data;}';
-    echo 'async function refresh(){try{const data=await call("GET");jobs.replaceChildren();for(const j of data.jobs){const p=document.createElement("p");p.textContent=j.created_at+" · "+j.status+" · "+j.id.slice(0,8);if(j.result&&j.result.url){const a=document.createElement("a");a.href=j.result.url;a.textContent=" · Download MP3";p.append(a);}if(j.error_message)p.append(" · "+j.error_message);jobs.append(p);}}catch(e){message.textContent=e.message;}}';
+    echo 'async function refresh(){try{const data=await call("GET");jobs.replaceChildren();for(const j of data.jobs){const p=document.createElement("p");p.textContent=j.created_at+" · "+j.status+" · "+j.id.slice(0,8);if(j.result&&j.result.post_url){const a=document.createElement("a");a.href=j.result.post_url;a.textContent=" · Open published mix";p.append(a);}if(j.result&&j.result.url){const a=document.createElement("a");a.href=j.result.url;a.textContent=" · MP3";p.append(a);}if(j.error_message)p.append(" · "+j.error_message);jobs.append(p);}}catch(e){message.textContent=e.message;}}';
     echo 'form.addEventListener("submit",async e=>{e.preventDefault();const data=Object.fromEntries(new FormData(form));for(const key of ["playlist_id","bars","advance_bars"])data[key]=Number(data[key]);message.textContent="Submitting...";try{const r=await call("POST",data);message.textContent="Queued "+r.included+" tracks ("+r.omitted.length+" ineligible skipped).";refresh();}catch(err){message.textContent=err.message;}});refresh();setInterval(refresh,30000);})();</script>';
     return ob_get_clean();
 });
